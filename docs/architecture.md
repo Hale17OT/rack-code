@@ -1,12 +1,12 @@
 # Architecture
 
-Status: evolving architecture draft, updated 2026-10-12.
+Status: evolving architecture with the headless MVP foundation implemented, updated 2026-10-12.
 
-This document is the architecture entry point required by [AGENTS.md](../AGENTS.md). It captures the agreed product direction and proposes boundaries for incremental implementation. Proposed structures and recommendations are not approval to scaffold or implement them. No application code exists yet.
+This document is the architecture entry point required by [AGENTS.md](../AGENTS.md). It captures the agreed product direction and the boundaries used by the implemented headless MVP. UI, Electron lifecycle, background hosting, browser integration, timeline, retrospective, orchestration, and isolated parallel work remain follow-on work.
 
 ## Product and implementation scope
 
-The product is a desktop coding agent harness and control panel built around existing agent runtimes. The application owns its user experience, accounts, global sessions, and additional capabilities. Planned integrations are the Codex app server and Claude Agent SDK; the integration for additional models remains undecided, with Pi a candidate.
+The product is a desktop coding agent harness and control panel built around existing agent runtimes. The application owns its user experience, accounts, global sessions, and additional capabilities. The initial integrations are the Codex app server and Claude Agent SDK. Both are first-class runtime adapters behind a shared application contract; adding Pi or another harness should require a new adapter rather than provider-specific changes to core sessions, execution, permissions, or persistence.
 
 Persistent computers, hosted by the product or connected by users, are a future extension. The initial application must work locally without that extension. Future hosting should reuse application behavior through a different host and adapters rather than require extracting rules from UI code.
 
@@ -70,7 +70,25 @@ Proposed ownership:
 | Retrospective | Post-run analysis and environment observations with provenance and validity | Contributes guidance through an explicit optional input; execution works without it |
 | Orchestration | User-defined workflows and stage assignments across models/providers | Calls the same execution services used by a single interactive run |
 
-The first five rows describe foundational responsibilities, with exact module granularity still proposed. Timeline, retrospective, and orchestration are optional modules maintained and shipped by the product owner, with on/off controls in settings. Third-party installation is not the intended meaning of optional. Specific adapter boundaries may emerge as integrations are validated.
+The first five rows describe the implemented foundational modules. Timeline, retrospective, and orchestration are optional modules maintained and shipped by the product owner, with on/off controls in settings. Third-party installation is not the intended meaning of optional. Specific adapter boundaries may emerge as integrations are validated.
+
+### Concrete runtime contract
+
+"Provider-neutral" has a strict meaning: core modules may import only application-owned contracts and data types. They must not import Codex app-server protocol names, Claude Agent SDK classes, provider transcript types, provider credential objects, or provider-specific event names. Those imports belong only inside `adapters/runtimes/codex` and `adapters/runtimes/claude`.
+
+The implemented shared runtime contract uses these operations and values:
+
+- `RuntimeAdapter.startRun(input)` starts an attempt from application-owned input containing the application session, attempt, workspace, prompt, selected model, permission mode, and optional native continuation reference.
+- `RuntimeAdapter.resumeRun(input)` continues a provider-native attempt when the adapter reports that resume is supported.
+- `RuntimeAdapter.cancelRun(attemptId)` requests interruption and reports whether the provider acknowledged it.
+- `RuntimeAdapter.capabilities(accountId)` returns explicit support flags for resume, fork, approvals, quota reporting, browser tools, computer use, and other optional behavior.
+- The adapter emits normalized application events such as `message_delta`, `tool_request`, `tool_result`, `approval_request`, `usage`, `completed`, `failed`, and `interrupted`.
+
+The Codex adapter translates these operations into app-server initialization, thread, turn, notification, approval, and interruption messages. The Claude adapter translates them into Agent SDK query, session, permission, and streaming operations. Core execution handles the normalized operations and events without checking which provider produced them. A provider-specific feature is exposed as a capability or an explicitly named adapter extension; it is not implemented as a provider-name conditional in core code or the renderer. The concrete implementation and deferred behavior are recorded in [MVP implementation](mvp.md).
+
+The product requires users to bring their own provider subscriptions and requires multiple accounts in the first release. Each saved account therefore has its own provider identity, authentication mode, protected credential reference, runtime configuration context, and availability state. Switching accounts changes which account a new attempt uses; it does not mutate credentials for an active attempt. Concurrent attempts using different accounts must not share credential files, token caches, native session directories, or mutable runtime configuration.
+
+Subscription authentication has documented technical support for both initial runtimes. The Codex app-server documentation describes ChatGPT-managed login and device-code login. Claude documents subscription OAuth tokens for SDK environments, separate account contexts through `CLAUDE_CONFIG_DIR`, account inspection, and subscription rate-limit events. The Agent SDK is intended to embed Claude Code's agent loop in an application, and the product decision is to proceed with that wrapper model using users' own subscriptions. This does not change the requirement to keep credentials and native session state isolated per account. See [runtime integration notes](runtime-integration-notes.md) for the concrete authentication path and isolation behavior.
 
 ## Dependency direction and composition
 
@@ -104,7 +122,7 @@ src/
     renderer/              UI shell and feature-specific presentation
   core/
     authentication/
-    accounts/
+    accounts/              Account identity, availability, selection, and switching policy
     sessions/
     execution/
     projects/
@@ -159,7 +177,7 @@ Shared operations use common interfaces. Runtime-specific extensions remain expl
 
 The application wraps the existing runtimes and should reuse their available execution, browser, and computer-use capabilities. Availability must be verified per integration: a vendor's desktop product may expose features that its SDK does not. Pi's browser and computer-use capabilities remain unverified.
 
-The initial documentation findings are recorded in [runtime integration notes](runtime-integration-notes.md). Account isolation, supported authentication for distribution, browser reuse, and cross-runtime handoffs still need targeted verification before implementation. The product requirements do not establish that upstream APIs already provide those behaviors.
+The initial documentation findings are recorded in [runtime integration notes](runtime-integration-notes.md). Account isolation and supported authentication are represented in the implemented adapters; browser reuse, complete cross-runtime context handoff, and distribution-specific authentication still need targeted verification before those features are exposed. The product requirements do not establish that upstream APIs already provide those deferred behaviors.
 
 ### Browser ownership under discussion
 
@@ -239,7 +257,7 @@ The following questions affect multiple modules. They are discussion items, not 
 
 | Priority | Gap | Decision or evidence needed | Why it matters |
 | --- | --- | --- | --- |
-| 1 | Runtime feasibility and account isolation | Verify each integration's supported account authentication, independent credential/configuration contexts, quota signals, event access, and resume behavior. Distinguish API credentials from subscription-backed accounts. | Automatic switching and global sessions depend on upstream behavior; a generic adapter cannot manufacture missing capabilities. |
+| 1 | Runtime feasibility and account isolation | Verify Codex and Claude subscription authentication for a third-party wrapper, required approval status, independent credential/configuration contexts for multiple accounts, quota signals, event access, and resume behavior. Distinguish API credentials from subscription-backed accounts. | BYO subscriptions and multiple accounts are first-release requirements; a generic adapter cannot manufacture unsupported login or isolation behavior. |
 | 2 | Execution ownership and lifetime | Default stop-on-exit and optional background execution are requested. Decide host supervision, exact quit behavior, and reconnection protocol. | Determines process supervision, IPC, shutdown, and future remote hosting boundaries. A separate process is not by itself an independent background service. |
 | 3 | Session and recovery contract | Agree on session, run, attempt, and checkpoint identities; define canonical recorded content, native continuation data, and ownership of writes. | Affects account handoff, restart recovery, timeline, and orchestration. One logical session must not imply unrestricted concurrent mutation of one conversation. |
 | 4 | Execution authority and permissions | Four app-owned modes are requested. Define their exact scopes, the approve-for-me reviewer, runtime mappings, and preservation of pending approvals. | UI modes, runtimes, and account switching must not create inconsistent authority. Do not assume every runtime can route all tools through an app-owned executor. |

@@ -1,0 +1,23 @@
+{
+  "name": "thinking-and-code",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Desktop coding agent harness",
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "test": "tsx --test \"src/**/*.test.ts\"",
+    "check": "npm run build && npm test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.296"
+  }
+}
