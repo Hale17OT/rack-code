@@ -1,6 +1,6 @@
 # Runtime integration notes
 
-Status: documentation findings for architecture discussion, 2026-10-11. No integration code or compatibility experiments have been run. Documentation can change; verify against pinned versions before implementation.
+Status: documentation findings and implemented adapter notes, updated 2026-10-12. Claude subscription authentication and account-isolation documentation were rechecked on that date. The adapter code targets the locally installed Codex CLI and `@anthropic-ai/claude-agent-sdk` versions; live credential execution remains an operator verification step. Documentation can change; verify against pinned versions before packaging.
 
 ## Codex app server
 
@@ -26,10 +26,23 @@ Claude documents WebSearch and WebFetch. These search or retrieve content; they 
 
 The SDK supports externally configured MCP servers and app-defined tools. This provides a candidate route for an app-owned browser, subject to implementation and permission validation. See [SDK MCP integration](https://code.claude.com/docs/en/agent-sdk/mcp).
 
-The SDK overview explicitly says third-party developers need prior approval to offer claude.ai login or subscription rate limits in their products. It points developers toward API-key authentication. Supported subscription-account integration is therefore unresolved, not an automatic consequence of wrapping the SDK. See the [SDK overview](https://code.claude.com/docs/en/agent-sdk/overview).
+### Claude subscription authentication and multiple accounts
+
+The SDK is designed to embed Claude Code's agent loop in a TypeScript or Python application. It runs the Claude Code binary and exposes built-in tools, permissions, sessions, hooks, and MCP. This fits the intended wrapper architecture. See the [SDK overview](https://code.claude.com/docs/en/agent-sdk/overview).
+
+Technical subscription support is documented explicitly:
+
+- `CLAUDE_CODE_OAUTH_TOKEN` supplies a claude.ai OAuth token for SDK and automated environments. `claude setup-token` generates a subscription-backed token for Pro, Max, Team, or Enterprise accounts. The token is not automatically saved or refreshed; an expired environment token requires replacement and a process restart. Bare mode does not read it. See [environment variables](https://code.claude.com/docs/en/env-vars) and [generate a long-lived token](https://code.claude.com/docs/en/authentication#generate-a-long-lived-token).
+- `CLAUDE_CONFIG_DIR` gives each account separate settings, native session history, plugins, and claude.ai login credentials. On macOS, the Keychain entry is keyed to this directory too; on other documented platforms, the credential file resides in that directory. Keyless Claude Console sign-ins are a separate case and are not isolated by this setting. See [multiple-account login](https://code.claude.com/docs/en/authentication#log-in-with-multiple-accounts) and [credential management](https://code.claude.com/docs/en/authentication#credential-management).
+- The TypeScript SDK's `options.env` replaces the spawned process environment. The adapter can therefore supply the selected account's configuration directory and authentication values per process, without changing the parent process environment. Inherited `ANTHROPIC_API_KEY` must be excluded when using subscriptions because it overrides subscription billing. See the [SDK options](https://code.claude.com/docs/en/agent-sdk/typescript#options) and [environment-variable precedence](https://code.claude.com/docs/en/env-vars).
+- `query.accountInfo()` exposes fields including email, organization, subscription type, and credential sources. `SDKRateLimitEvent` carries status and optional reset/utilization information, including subscription credit exhaustion. These are observations, not a guarantee that every subscription limit can be queried in advance. See [account information](https://code.claude.com/docs/en/agent-sdk/typescript#accountinfo) and [rate-limit events](https://code.claude.com/docs/en/agent-sdk/typescript#sdkratelimitevent).
+
+A concrete candidate integration is one account-specific Claude Code process launched by the SDK with its own `CLAUDE_CONFIG_DIR` and a deliberately constructed `options.env`. Authentication can use the login stored in that directory or an explicitly supplied subscription OAuth token. Account switching selects a different context for the next attempt; it does not rewrite an active process's credentials. Runtime tests must still verify login, refresh or token replacement, concurrent isolation, account identity, resume across account changes, and exhaustion handling against pinned versions.
+
+The SDK overview is explicit that the Agent SDK embeds Claude Code's agent loop in a developer's own application, and Anthropic's [Commercial Terms](https://www.anthropic.com/legal/commercial-terms) state that Services may power products made available to a customer's own users. The project therefore proceeds with a Claude Agent SDK wrapper using users' own subscriptions. The implementation must preserve the documented account and credential boundaries and keep the source terms linked for distribution review; it does not treat Claude subscription support as a technical blocker or replace the product requirement with API-key-only access.
 
 ## Proposed application boundary
 
 Own the logical session, user-visible history, execution records, selected permission mode, and runtime associations. Preserve native continuation state behind each adapter and use supported runtime mechanisms to resume it. On a runtime handoff, supply relevant application context not already seen by the target runtime. This is a proposed design based on the documentation, not a claim that lossless cross-runtime resume is already provided.
 
-Before implementation, verify account/configuration isolation, supported authentication, complete observable event coverage, transcript recovery, browser/computer tool exposure, and policy enforcement against the actual runtime versions. Pi integration remains unresearched.
+The MVP now creates one Codex app-server process per attempt with an account-specific `CODEX_HOME`, and one Claude SDK query with an account-specific `CLAUDE_CONFIG_DIR` and merged child-process environment. It maps native message, tool, approval, usage, rate-limit, completion, interruption, and failure signals into the core event contract. Browser and computer-use capabilities are explicitly reported as unsupported by these adapters until a supported app-owned integration is implemented. Pi integration remains unresearched.

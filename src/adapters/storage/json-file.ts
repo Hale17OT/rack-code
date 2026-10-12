@@ -1,0 +1,71 @@
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+
+/**
+ * Version-neutral JSON document persistence for the local MVP.
+ *
+ * Writes use a temporary file followed by rename, so a process crash cannot
+ * leave a partially written document at the canonical path. Domain stores add
+ * schema versions and own their migrations around this primitive.
+ */
+export class JsonFileDocument<T> {
+  private loaded: T | undefined;
+  private writeChain: Promise<void> = Promise.resolve();
+
+  constructor(
+    private readonly filePath: string,
+    private readonly initialValue: T,
+  ) {}
+
+  async read(): Promise<T> {
+    if (this.loaded !== undefined) {
+      return structuredClone(this.loaded);
+    }
+
+    try {
+      const content = await readFile(this.filePath, "utf8");
+      this.loaded = JSON.parse(content) as T;
+    } catch (error) {
+      if (!isMissingFile(error)) {
+        throw error;
+      }
+      this.loaded = structuredClone(this.initialValue);
+      await this.write(this.loaded);
+    }
+    return structuredClone(this.loaded);
+  }
+
+  async update(mutator: (current: T) => T | Promise<T>): Promise<T> {
+    const operation = this.writeChain.then(async () => {
+      const current = await this.read();
+      const next = await mutator(current);
+      this.loaded = structuredClone(next);
+      await this.write(this.loaded);
+      return structuredClone(this.loaded);
+    });
+    this.writeChain = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private async write(value: T): Promise<void> {
+    await mkdir(dirname(this.filePath), { recursive: true });
+    const temporaryPath = `${this.filePath}.${process.pid}.tmp`;
+    await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    await rename(temporaryPath, this.filePath);
+  }
+}
+
+function isMissingFile(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "ENOENT"
+  );
+}
