@@ -1,5 +1,12 @@
 # Change log
 
+## 2026-10-12 - Simple chat transcript
+
+- Replaced run cards with a Codex/T3-style chat. Prompts are right-aligned bubbles with clipping for long text. Replies are Markdown-rendered page text with a meta row (copy, time, labels, Details, Stop), compact expandable tool rows, inline approval cards, a turn navigator, and a "Scroll to end" pill. Run details moved behind the per-reply Details toggle.
+- Added `markdown.ts`, a pure parser with a DOM renderer that uses text nodes only, and tests for blocks, streaming fences, inline markup, and rejection of non-http links.
+- Validation performed: `npm run check` passes (37 tests). In the running app, a session with completed turns in the throwaway test data rendered prompt bubbles, the clipped long prompt, inline code, bold, a numbered list, a code block, and meta rows.
+- Not performed: streaming, tool rows, and approvals during a live run.
+
 ## 2026-10-12 - Verify desktop integration on `feat/minimal-desktop-ui`
 
 - Checked out and validated the desktop branch with the renderer, preload bridge, Electron main process, execution host, and composed application running together.

@@ -1,15 +1,24 @@
 /**
- * Center column: the selected session's conversation, rendered per run.
+ * Center column: the open session as a simple chat transcript.
  *
- * Each run block shows its prompt, a label row (runtime, provider, account,
- * model, permission mode, attempt, status), and its output:
- * - active runs render the live event fold (streaming text, tools,
- *   approvals) from the host snapshot plus live events;
- * - finished runs render the persisted assistant message for that run, or
- *   the run result/error when no message was saved.
+ * Each run is one turn:
+ * - the prompt is a right-aligned bubble; long prompts are clipped with a
+ *   "Show full message" toggle;
+ * - the reply is plain text in the page (no bubble), rendered as Markdown.
+ *   While a run is active it shows the live event fold: streaming text,
+ *   compact one-line tool rows that expand on click, and approval cards.
+ *   A finished run shows its persisted assistant message;
+ * - a quiet meta row under the reply has copy, time, the runtime/account
+ *   labels, a Details toggle (inline run details and journal), and Stop
+ *   while active.
  *
- * Tool details of finished runs are available from the journal in the run
- * detail panel rather than re-folded here, which keeps session loading cheap.
+ * Also renders the session title in the toolbar slot, a left-edge turn
+ * navigator (one tick per turn, highlighting those in view), and a
+ * "Scroll to end" pill when the view is not at the bottom.
+ *
+ * The transcript re-renders on every state change (batched per frame), so
+ * presentation state that must survive a re-render (expanded prompts,
+ * opened tool rows) lives in closure sets keyed by stable IDs.
  */
 import type {
   AccountView,
@@ -19,20 +28,40 @@ import type {
   WorkspaceView,
 } from "../../../contracts/desktop/index.js";
 import type { Controller } from "../controller.js";
-import { dataView, h, replace, row, shortId } from "../dom.js";
+import { dataView, formatData, formatTime, h, replace, row, shortId } from "../dom.js";
 import { icon } from "../icons.js";
+import { renderMarkdown } from "../markdown.js";
 import type { AppState, LiveRun, Store } from "../store.js";
 import { foldEvents, type TranscriptItem, type TranscriptState } from "../transcript.js";
 import { renderRunDetails } from "./run-detail.js";
-import { accountLabel, isActiveStatus, PERMISSION_LABELS, runBadge, runtimeOf } from "./run-format.js";
+import { accountLabel, isActiveStatus, PERMISSION_LABELS, runtimeOf } from "./run-format.js";
 
-/**
- * Mounts the transcript into `root` and the session title/metadata into
- * `header`, a slot the shell places in the main toolbar.
- */
+/** Prompts longer than this (characters or lines) start clipped. */
+const LONG_PROMPT_CHARS = 600;
+const LONG_PROMPT_LINES = 8;
+/** Distance from the bottom, in pixels, that still counts as "at the end". */
+const AT_END_THRESHOLD = 48;
+
+interface ViewMemory {
+  readonly expandedPrompts: Set<string>;
+  readonly openTools: Set<string>;
+}
+
 export function mountSessionView(root: HTMLElement, header: HTMLElement, store: Store, controller: Controller): void {
   const transcript = h("div", { class: "transcript" });
-  root.append(transcript);
+  const rail = h("nav", { class: "turn-rail", aria: { label: "Turns" } });
+  const scrollToEnd = h("button", {
+    class: "scroll-end",
+    onClick: () => transcript.scrollTo({ top: transcript.scrollHeight, behavior: "smooth" }),
+  }, icon("caret-down"), "Scroll to end");
+  scrollToEnd.hidden = true;
+  root.append(transcript, rail, scrollToEnd);
+
+  const memory: ViewMemory = { expandedPrompts: new Set(), openTools: new Set() };
+  let current: AppState | undefined;
+  const rerender = () => {
+    if (current !== undefined) draw(current, false);
+  };
 
   // Folding is memoized per events array: unchanged live runs are not re-folded.
   const folds = new WeakMap<readonly unknown[], TranscriptState>();
@@ -45,17 +74,35 @@ export function mountSessionView(root: HTMLElement, header: HTMLElement, store: 
     return state;
   };
 
+  const isAtEnd = () => transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < AT_END_THRESHOLD;
+  const updateChrome = () => {
+    scrollToEnd.hidden = isAtEnd();
+    updateRail(rail, transcript);
+  };
+  transcript.addEventListener("scroll", updateChrome, { passive: true });
+
+  function draw(state: AppState, jumpToEnd: boolean): void {
+    // Keep following streamed output only when the user is already at the end.
+    const follow = jumpToEnd || isAtEnd();
+    const scrollTop = transcript.scrollTop;
+    replace(transcript, ...renderTranscript(state, controller, fold, memory, rerender));
+    transcript.scrollTop = follow ? transcript.scrollHeight : scrollTop;
+    renderRail(rail, transcript);
+    updateChrome();
+  }
+
   store.watch((state) => [state.session, state.workspaces, state.selection.sessionId], (_slice, state) => {
     replace(header, ...renderHeader(state.session, state.workspaces));
   });
 
+  let lastSessionId: string | undefined;
   store.watch(
     (state) => [state.session, state.runs, state.live, state.accounts, state.selection.runId, state.journal, state.workspaces, state.runtimes, state.acknowledgedUnknown],
     (_slice, state) => {
-      // Keep following streamed output only when the user is already at the bottom.
-      const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 48;
-      replace(transcript, ...renderTranscript(state, controller, fold));
-      if (atBottom) transcript.scrollTop = transcript.scrollHeight;
+      current = state;
+      const sessionChanged = state.session?.id !== lastSessionId;
+      lastSessionId = state.session?.id;
+      draw(state, sessionChanged);
     },
   );
 }
@@ -76,9 +123,6 @@ function renderHeader(session: SessionView | undefined, workspaces: readonly Wor
     h("div", { class: "session-chips" },
       workspace?.activeWriterAttemptId === undefined ? null : h("span", { class: "chip" },
         icon("pencil-simple"), `writer ${shortId(workspace.activeWriterAttemptId)}`),
-      // Native IDs are diagnostic continuation metadata only.
-      ...session.continuations.map((continuation) => h("span", { class: "chip", title: continuation.nativeSessionId },
-        icon("plugs"), `${continuation.runtimeId} ${shortId(continuation.nativeSessionId)}`)),
     ),
   ];
 }
@@ -87,10 +131,12 @@ function renderTranscript(
   state: AppState,
   controller: Controller,
   fold: (live: LiveRun) => TranscriptState,
+  memory: ViewMemory,
+  rerender: () => void,
 ): Node[] {
   const session = state.session;
   if (session === undefined || state.selection.sessionId === undefined) {
-    return [placeholder("chat-circle-text", "No session selected", "Create a project, a workspace, and a session from the sidebar.")];
+    return [placeholder("chat-circle-text", "No session selected", "Open a session from the sidebar, or start one with the + on a project folder.")];
   }
 
   // Live runs of this session that the persisted list does not contain yet.
@@ -98,123 +144,162 @@ function renderTranscript(
     .map((live) => live.run)
     .filter((run) => run.sessionId === session.id && !state.runs.some((stored) => stored.id === run.id));
   const runs = [...state.runs, ...liveOnly];
-  const runIds = new Set(runs.map((run) => run.id));
-
-  // Messages not linked to any run (none are produced today) are shown first.
-  const orphanMessages = session.messages
-    .filter((message) => message.metadata?.["runId"] === undefined || !runIds.has(message.metadata["runId"]))
-    .map((message) => h("div", { class: `message message-${message.role}` },
-      h("span", { class: "label" }, message.role),
-      h("div", { class: "assistant-text" }, message.content),
-    ));
-
-  if (runs.length === 0 && orphanMessages.length === 0) {
-    return [placeholder("terminal-window", "Ready", "Write a prompt below to start the first run.")];
+  if (runs.length === 0) {
+    return [placeholder("terminal-window", "What should we work on?", "Describe a task below. The agent works in this session's workspace.")];
   }
-
-  return [
-    ...orphanMessages,
-    ...runs.map((run, index) => renderRun(run, index + 1, state, controller, fold)),
-  ];
+  return runs.map((run) => renderTurn(run, state, controller, fold, memory, rerender));
 }
 
-function renderRun(
+function renderTurn(
   stored: RunView,
-  ordinal: number,
   state: AppState,
   controller: Controller,
   fold: (live: LiveRun) => TranscriptState,
+  memory: ViewMemory,
+  rerender: () => void,
 ): HTMLElement {
   const live = state.live[stored.id];
   const run = live?.run ?? stored;
   const account = state.accounts.find((candidate) => candidate.id === run.accountId);
-  const selected = state.selection.runId === run.id;
+  const detailsOpen = state.selection.runId === run.id;
+  const openLink = (href: string) => controller.openExternal(href);
 
-  const body: Node[] = [];
+  const reply: Node[] = [];
+  let copyText = "";
   if (live !== undefined) {
     const folded = fold(live);
-    body.push(...folded.items.map((item) => renderItem(item, run, account, live, controller)));
-    if (folded.failure !== undefined) body.push(errorBlock(folded.failure.error));
-    if (folded.items.length === 0) {
-      body.push(h("div", { class: "run-waiting" },
+    for (const [index, item] of folded.items.entries()) {
+      reply.push(renderItem(item, `${run.id}:${index}`, run, account, live, controller, memory, openLink));
+    }
+    copyText = folded.items.flatMap((item) => item.kind === "text" ? [item.text] : []).join("\n\n");
+    if (folded.failure !== undefined) reply.push(errorLine(folded.failure.error));
+    if (isActiveStatus(run.status)) {
+      reply.push(h("div", { class: "working" },
         icon("circle-notch", { className: "spin" }),
-        run.status === "queued" ? "Waiting for workspace and runtime" : "Working"));
+        live.cancelRequested ? "Stopping" : run.status === "queued" ? "Waiting for the workspace" : "Working"));
     }
   } else {
     const assistant = state.session?.messages.find((message) =>
       message.role === "assistant" && message.metadata?.["runId"] === run.id);
-    const text = assistant?.content ?? run.result;
-    if (text !== undefined) body.push(h("div", { class: "assistant-text" }, text));
-    if (run.error !== undefined) body.push(errorBlock(run.error));
+    copyText = assistant?.content ?? run.result ?? "";
+    if (copyText !== "") reply.push(h("div", { class: "md" }, renderMarkdown(copyText, openLink)));
+    if (run.error !== undefined) reply.push(errorLine(run.error));
+    if (run.status === "interrupted") reply.push(h("div", { class: "note" }, icon("stop-circle"), "Stopped"));
+    if (run.status === "unknown") reply.push(h("div", { class: "note" }, icon("question"), "Ended without a final result. Open Details before continuing."));
+  }
+  if (live?.fallbackFromAccountId !== undefined) {
+    const from = state.accounts.find((candidate) => candidate.id === live.fallbackFromAccountId);
+    reply.unshift(h("div", { class: "note" }, icon("info"),
+      `${accountLabel(from, live.fallbackFromAccountId)} was unavailable; using ${accountLabel(account, run.accountId)}.`));
   }
 
-  const cancellable = live !== undefined && isActiveStatus(run.status);
-  return h("article", { class: selected ? "run selected" : "run", data: { runId: run.id } },
+  const labels = [runtimeOf(run), accountLabel(account, run.accountId), run.model, PERMISSION_LABELS[run.permissionMode].label]
+    .filter((part): part is string => part !== undefined).join(" · ");
+  const meta = h("div", { class: "turn-meta" },
+    copyText === "" ? null : h("button", {
+      class: "icon-button meta-button",
+      title: "Copy reply",
+      aria: { label: "Copy reply" },
+      onClick: (event) => void copy(copyText, event.currentTarget as HTMLButtonElement),
+    }, icon("copy")),
+    h("span", { class: "meta-time" }, formatTime(run.createdAt)),
+    h("span", { class: "meta-labels" }, labels),
     h("button", {
-      class: "run-header",
-      title: selected ? "Hide run details" : "Show run details",
-      aria: { expanded: String(selected) },
+      class: detailsOpen ? "meta-link active" : "meta-link",
+      aria: { expanded: String(detailsOpen) },
       onClick: () => void controller.selectRun(run.id),
-    },
-      h("span", { class: "run-ordinal" }, String(ordinal).padStart(2, "0")),
-      runBadge(run.status),
-      h("span", { class: "run-labels" },
-        [runtimeOf(run), accountLabel(account, run.accountId), run.model ?? "default model",
-          PERMISSION_LABELS[run.permissionMode].label].join(" / ")),
-      icon("caret-right", { className: selected ? "run-caret open" : "run-caret" }),
-    ),
-    h("div", { class: "prompt" }, run.prompt),
-    live?.fallbackFromAccountId === undefined ? null : h("div", { class: "run-note" },
-      icon("info"),
-      `Selected account ${accountLabel(state.accounts.find((candidate) => candidate.id === live.fallbackFromAccountId), live.fallbackFromAccountId)} was unavailable; using ${accountLabel(account, run.accountId)}.`),
-    body.length === 0 ? null : h("div", { class: "run-body" }, ...body),
-    selected ? renderRunDetails(run, state, controller) : null,
-    !cancellable ? null : h("div", { class: "run-actions" },
-      h("button", {
-        class: "button",
+    }, "Details"),
+    live !== undefined && isActiveStatus(run.status)
+      ? h("button", {
+        class: "meta-link",
         disabled: live.cancelRequested,
         onClick: () => void controller.cancelRun(run.id),
-      }, icon("stop-circle"), live.cancelRequested ? "Cancelling" : "Cancel"),
+      }, live.cancelRequested ? "Stopping" : "Stop")
+      : null,
+  );
+
+  return h("article", { class: "turn", data: { runId: run.id } },
+    renderPrompt(run, memory, rerender),
+    h("div", { class: "reply" }, ...reply, meta, detailsOpen ? renderRunDetails(run, state, controller) : null),
+  );
+}
+
+function renderPrompt(run: RunView, memory: ViewMemory, rerender: () => void): HTMLElement {
+  const long = run.prompt.length > LONG_PROMPT_CHARS || run.prompt.split("\n").length > LONG_PROMPT_LINES;
+  const expanded = memory.expandedPrompts.has(run.id);
+  return h("div", { class: "prompt-row" },
+    h("div", { class: long && !expanded ? "bubble clipped" : "bubble" },
+      h("div", { class: "bubble-text" }, run.prompt),
+      !long ? null : h("button", {
+        class: "bubble-toggle",
+        onClick: () => {
+          if (expanded) memory.expandedPrompts.delete(run.id);
+          else memory.expandedPrompts.add(run.id);
+          rerender();
+        },
+      }, expanded ? "Show less" : "Show full message"),
     ),
   );
 }
 
 function renderItem(
   item: TranscriptItem,
+  key: string,
   run: RunView,
   account: AccountView | undefined,
   live: LiveRun,
   controller: Controller,
+  memory: ViewMemory,
+  openLink: (href: string) => void,
 ): Node {
   switch (item.kind) {
     case "text":
-      return h("div", { class: "assistant-text" }, item.text);
+      return h("div", { class: "md" }, renderMarkdown(item.text, openLink));
     case "tool":
-      return h("div", { class: "tool" },
-        h("div", { class: "tool-row" },
-          h("span", { class: "icon-tile" }, icon("terminal-window")),
-          h("span", { class: "tool-text" },
-            h("span", { class: "tool-name" }, item.tool),
-            h("span", { class: "tool-meta" }, item.hasOutput ? "completed" : "in progress"),
-          ),
-          item.hasOutput ? icon("check", { className: "tool-state" }) : icon("circle-notch", { className: "tool-state spin" }),
-        ),
-        dataView("Input", item.input),
-        item.hasOutput ? dataView("Output", item.output) : null,
-      );
+      return toolLine(key, memory, item.hasOutput ? "check" : "circle-notch", item.tool, item.hasOutput ? "" : "running",
+        [["Input", item.input], ...(item.hasOutput ? [["Output", item.output] as const] : [])], !item.hasOutput);
     case "tool_output":
-      return h("div", { class: "tool" }, dataView("Result", item.output));
+      return toolLine(key, memory, "terminal-window", "Tool result", "", [["Output", item.output]], false);
     case "approval":
       return renderApproval(item.request, run, account, live, controller);
     case "status":
-      return h("div", { class: "run-note" }, icon("info"), item.label, item.detail === undefined ? null : `: ${item.detail}`);
+      return h("div", { class: "note" }, icon("info"), item.label, item.detail === undefined ? null : `: ${item.detail}`);
   }
+}
+
+/** One-line tool row; expands to show input/output. Open state survives re-renders. */
+function toolLine(
+  key: string,
+  memory: ViewMemory,
+  iconName: Parameters<typeof icon>[0],
+  title: string,
+  status: string,
+  sections: ReadonlyArray<readonly [string, unknown]>,
+  spinning: boolean,
+): HTMLElement {
+  const details = h("details", { class: "tool-line", open: memory.openTools.has(key) },
+    h("summary", {},
+      icon(iconName, { className: spinning ? "spin" : "" }),
+      h("span", { class: "tool-line-title" }, title),
+      status === "" ? null : h("span", { class: "tool-line-status" }, status),
+      icon("caret-right", { className: "tool-line-caret" }),
+    ),
+    ...sections.map(([name, value]) => h("div", { class: "tool-line-section" },
+      h("span", { class: "label" }, name),
+      h("pre", {}, formatData(value)),
+    )),
+  );
+  details.addEventListener("toggle", () => {
+    if (details.open) memory.openTools.add(key);
+    else memory.openTools.delete(key);
+  });
+  return details;
 }
 
 /**
  * Approval card. Shows everything the spec lists (request ID, tool, input,
  * reason, runtime/provider, account, workspace, run/attempt) and answers
- * with the exact request ID.
+ * with the exact request ID. Answered approvals collapse to one line.
  */
 function renderApproval(
   request: ApprovalRequest,
@@ -225,32 +310,34 @@ function renderApproval(
 ): HTMLElement {
   const pending = live.pendingApprovals.some((candidate) => candidate.id === request.id);
   const decision = live.decisions[request.id];
-  return h("div", { class: pending ? "approval pending" : "approval" },
+  if (!pending) {
+    return h("div", { class: "note" },
+      icon(decision === "deny" ? "prohibit" : "shield-check"),
+      decision === undefined ? `${request.tool}: approval resolved` : `${request.tool}: ${decision === "allow" ? "allowed" : "denied"}`);
+  }
+  return h("div", { class: "approval pending" },
     h("div", { class: "approval-head" },
-      h("span", { class: "icon-tile" }, icon(pending ? "hand" : decision === "deny" ? "prohibit" : "shield-check")),
-      h("span", { class: "tool-text" },
-        h("span", { class: "tool-name" }, pending ? "Approval required" : decision === undefined ? "Approval resolved" : `Approval ${decision === "allow" ? "allowed" : "denied"}`),
-        h("span", { class: "tool-meta" }, `${request.tool} / ${shortId(request.id)}`),
-      ),
+      icon("hand"),
+      h("span", { class: "approval-title" }, `Allow ${request.tool}?`),
+      h("span", { class: "approval-id" }, shortId(request.id)),
     ),
     request.reason === undefined ? null : h("p", { class: "approval-reason" }, request.reason),
+    dataView("Input", request.input),
     h("div", { class: "detail-rows" },
-      row("Tool", request.tool),
       row("Runtime / provider", `${runtimeOf(run)} / ${run.providerId}`),
       row("Account", accountLabel(account, run.accountId)),
       row("Workspace", shortId(run.workspaceId)),
       row("Run / attempt", `${shortId(run.id)} / ${shortId(run.attempts.at(-1)?.id)}`),
     ),
-    dataView("Input", request.input),
-    !pending ? null : h("div", { class: "approval-actions" },
-      h("button", { class: "button", onClick: () => void controller.respondToApproval(run.id, request.id, "deny") }, icon("x"), "Deny"),
-      h("button", { class: "button button-primary", onClick: () => void controller.respondToApproval(run.id, request.id, "allow") }, icon("check"), "Allow"),
+    h("div", { class: "approval-actions" },
+      h("button", { class: "button", onClick: () => void controller.respondToApproval(run.id, request.id, "deny") }, "Deny"),
+      h("button", { class: "button button-primary", onClick: () => void controller.respondToApproval(run.id, request.id, "allow") }, "Allow"),
     ),
   );
 }
 
-function errorBlock(text: string): HTMLElement {
-  return h("div", { class: "run-error" }, icon("warning-circle"), h("span", {}, text));
+function errorLine(text: string): HTMLElement {
+  return h("div", { class: "error-line" }, icon("warning-circle"), h("span", {}, text));
 }
 
 function placeholder(iconName: Parameters<typeof icon>[0], title: string, text: string): HTMLElement {
@@ -259,4 +346,38 @@ function placeholder(iconName: Parameters<typeof icon>[0], title: string, text: 
     h("p", { class: "placeholder-title" }, title),
     h("p", { class: "placeholder-text" }, text),
   );
+}
+
+/** Copies text and briefly swaps the button icon to a check mark. */
+async function copy(text: string, button: HTMLButtonElement): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    replace(button, icon("check"));
+    window.setTimeout(() => replace(button, icon("copy")), 1200);
+  } catch {
+    // Clipboard access can be refused; copying is a convenience.
+  }
+}
+
+/** One tick per turn; clicking a tick scrolls that turn into view. */
+function renderRail(rail: HTMLElement, transcript: HTMLElement): void {
+  const turns = [...transcript.querySelectorAll<HTMLElement>(".turn")];
+  rail.hidden = turns.length < 2;
+  replace(rail, ...turns.map((turn, index) => h("button", {
+    class: "turn-tick",
+    title: `Turn ${index + 1}`,
+    aria: { label: `Go to turn ${index + 1}` },
+    onClick: () => turn.scrollIntoView({ behavior: "smooth", block: "start" }),
+  })));
+}
+
+/** Highlights the ticks of turns currently visible in the transcript. */
+function updateRail(rail: HTMLElement, transcript: HTMLElement): void {
+  const view = transcript.getBoundingClientRect();
+  const turns = transcript.querySelectorAll<HTMLElement>(".turn");
+  const ticks = rail.querySelectorAll<HTMLElement>(".turn-tick");
+  turns.forEach((turn, index) => {
+    const rect = turn.getBoundingClientRect();
+    ticks[index]?.classList.toggle("visible", rect.bottom > view.top && rect.top < view.bottom);
+  });
 }
