@@ -1,0 +1,48 @@
+/**
+ * Facts the execution host broadcasts to every connected desktop client.
+ *
+ * Events describe things that already happened; clients never need to answer
+ * them for a host operation to complete. A client that misses events can
+ * rebuild state with the read commands (`runs.active`, `runs.journal`, the
+ * list queries), so events are a freshness signal, not the source of truth.
+ */
+import type { ApprovalRequest, ConnectView, RunView, RuntimeEvent } from "./views.js";
+
+export type HostEvent =
+  /** A new run was accepted. `fallbackFromAccountId` is set when the selected account was not used. */
+  | { readonly type: "run.started"; readonly run: RunView; readonly fallbackFromAccountId?: string }
+  /** The run's persisted status changed while it is still active (for example queued to running). */
+  | { readonly type: "run.updated"; readonly run: RunView }
+  /**
+   * One normalized runtime event. `index` is the zero-based position of the
+   * event within the run, matching `ActiveRunView.events`.
+   */
+  | { readonly type: "run.event"; readonly runId: string; readonly index: number; readonly event: RuntimeEvent }
+  /** An approval was answered by some client and is no longer pending. */
+  | {
+      readonly type: "run.approval_resolved";
+      readonly runId: string;
+      readonly approval: ApprovalRequest;
+      readonly decision: "allow" | "deny";
+    }
+  /** Cancellation was requested; the run continues until a terminal event. */
+  | { readonly type: "run.cancel_requested"; readonly runId: string }
+  /** The run reached a persisted terminal state. */
+  | { readonly type: "run.finished"; readonly run: RunView }
+  /** A sign-in changed state (URL known, code needed, completed, failed, cancelled). */
+  | { readonly type: "auth.updated"; readonly connect: ConnectView }
+  /** Account records changed (registration, selection, availability, usage). */
+  | { readonly type: "accounts.changed" }
+  /** The project list changed. */
+  | { readonly type: "projects.changed" }
+  /** Workspace records changed, for example a writer lock was taken or released. */
+  | { readonly type: "workspaces.changed"; readonly projectId: string }
+  /** Sessions in a project changed (new session, new message). */
+  | { readonly type: "sessions.changed"; readonly projectId: string; readonly sessionId: string }
+  /**
+   * Connection state of the execution host as seen by Electron main. Emitted
+   * by main rather than the host, because a crashed host cannot report itself.
+   */
+  | { readonly type: "host.status"; readonly status: "ready" | "exited"; readonly detail?: string };
+
+export type HostEventType = HostEvent["type"];

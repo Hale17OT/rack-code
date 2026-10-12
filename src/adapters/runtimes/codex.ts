@@ -61,6 +61,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     };
   }
 
+  describePermissionMode(mode: PermissionMode): string {
+    const policy = codexPermissionPolicy(mode);
+    return `Sandbox '${policy.sandbox}', approval policy '${policy.approvalPolicy}'.`;
+  }
+
   startRun(input: RuntimeRunInput): AsyncIterable<RuntimeEvent> {
     return this.run(input, false);
   }

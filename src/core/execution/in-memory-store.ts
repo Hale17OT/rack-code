@@ -12,6 +12,12 @@ export class InMemoryExecutionStore implements ExecutionStore {
     return run === undefined ? undefined : { ...run, attemptIds: [...run.attemptIds] };
   }
 
+  async listRuns(sessionId: string): Promise<readonly RunRecord[]> {
+    return [...this.runs.values()]
+      .filter((run) => run.sessionId === sessionId)
+      .map((run) => ({ ...run, attemptIds: [...run.attemptIds] }));
+  }
+
   async saveRun(run: RunRecord): Promise<void> {
     this.runs.set(run.id, { ...run, attemptIds: [...run.attemptIds] });
   }

@@ -1,6 +1,6 @@
 # UI specification
 
-Status: specification for the completed headless MVP, 2026-10-12. This document defines the presentation and interaction contract; it does not add a renderer, Electron window, or IPC layer.
+Status: specification for the completed headless MVP, 2026-10-12. The first desktop implementation of this contract is described in [desktop application](desktop.md); deviations and gaps are listed there under "Known gaps".
 
 The UI talks to an application host through typed commands and serializable snapshots/events. It never reads JSON files, provider credentials, SDK objects, or native runtime protocol messages directly. The host exposes the operations already implemented by `createApplication` and should add thin list/read queries where the current service surface does not yet provide one.
 
@@ -10,7 +10,7 @@ The account view is provider-scoped. It shows provider name, safe identity field
 
 Supported interactions:
 
-- **Add account:** collect provider, safe provider identity, credential reference, authentication method, and runtime-context ID. The authentication flow that obtains the reference belongs to a host adapter. On duplicate provider identity, show the existing account and explain that the same provider identity cannot be added twice.
+- **Add account:** the desktop UI offers "Connect <provider> account". The host's Connections module runs the provider sign-in in a fresh runtime context and registers the account with an opaque `native_login` reference (see [desktop application](desktop.md)). Headless hosts can still register an account directly with provider, safe identity, credential reference, authentication method, and runtime-context ID. On duplicate provider identity, show the existing account and explain that the same provider identity cannot be added twice.
 - **Select account:** call `accounts.select(providerId, accountId)`. Selection affects future attempts only; show active attempts with their original account.
 - **Re-authenticate:** after the host obtains a replacement credential, call `accounts.reauthenticate`. Show the account as `unknown` while it is rechecked. The operation may rotate the runtime context and clears stale reason/reset details.
 - **Refresh availability:** render adapter observations as they arrive. `unknown` means no successful health observation exists, `available` is eligible, `unavailable` means the provider reported a temporary limit/failure, and `reauth_required` means the account needs authentication before a new attempt can use it.
@@ -74,4 +74,4 @@ The MVP has no background execution host or Electron lifecycle implementation. A
 
 ## UI prerequisites and deferred features
 
-The first UI implementation should add host-facing list/read queries for projects, workspaces, sessions, runs, and journal entries while keeping their data ownership in the existing services/stores. It should not add persistence tables, provider conditionals, or credential handling to the renderer. Timeline, retrospective, orchestration, browser integration, remote relay, background mode, native transcript mirrors, automatic credential refresh, and isolated workspace creation are outside this MVP specification.
+The first UI implementation added host-facing list/read queries for projects, workspaces, sessions, runs, and journal entries (`ProjectsService.listProjects`/`listWorkspaces`, `SessionsService.list`, `ExecutionService.listRuns`/`getAttempt`/`listJournal`, `RuntimeRegistry.list`) while keeping their data ownership in the existing services/stores. It should not add persistence tables, provider conditionals, or credential handling to the renderer. Timeline, retrospective, orchestration, browser integration, remote relay, background mode, native transcript mirrors, automatic credential refresh, and isolated workspace creation are outside this MVP specification.

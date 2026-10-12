@@ -26,7 +26,8 @@ export class AccountProviderMismatchError extends AccountError {
 
 /** Raised when the same provider account has already been registered. */
 export class DuplicateAccountError extends AccountError {
-  constructor(providerId: string, providerAccountId: string) {
+  /** Exposed so clients can locate the existing account without parsing text. */
+  constructor(readonly providerId: string, readonly providerAccountId: string) {
     super(
       `Provider account '${providerAccountId}' is already registered for provider '${providerId}'.`,
     );

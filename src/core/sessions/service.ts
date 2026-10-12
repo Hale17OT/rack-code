@@ -55,6 +55,17 @@ export class SessionsService {
     return session;
   }
 
+  /**
+   * Lists sessions, optionally restricted to one project, most recently
+   * updated first so navigators show active conversations at the top.
+   */
+  async list(projectId?: string): Promise<readonly SessionRecord[]> {
+    const sessions = await this.store.list();
+    return sessions
+      .filter((session) => projectId === undefined || session.projectId === projectId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
   async appendMessage(
     sessionId: SessionId,
     input: Omit<SessionMessage, "id" | "createdAt"> & { id?: string; createdAt?: string },

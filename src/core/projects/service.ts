@@ -64,6 +64,22 @@ export class ProjectsService {
     return project;
   }
 
+  /** Lists saved projects in creation order for navigators and pickers. */
+  async listProjects(): Promise<readonly ProjectRecord[]> {
+    const projects = await this.store.listProjects();
+    return [...projects].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
+  /**
+   * Lists workspaces for one project in creation order. The returned records
+   * include the persisted writer lock so a UI can show the owning attempt.
+   */
+  async listWorkspaces(projectId: ProjectId): Promise<readonly WorkspaceRecord[]> {
+    await this.getProject(projectId);
+    const workspaces = await this.store.listWorkspaces(projectId);
+    return [...workspaces].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
   async createWorkspace(input: CreateWorkspaceInput): Promise<WorkspaceRecord> {
     await this.getProject(input.projectId);
     if (input.path.trim() === "") {

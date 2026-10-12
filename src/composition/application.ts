@@ -3,6 +3,9 @@ import { join } from "node:path";
 
 import { InMemoryCredentialResolver } from "../adapters/authentication/in-memory-credential-resolver.js";
 import { DirectoryRuntimeContextResolver } from "../adapters/authentication/directory-runtime-context-resolver.js";
+import { ClaudeConnector } from "../adapters/authentication/claude-connector.js";
+import { CodexConnector } from "../adapters/authentication/codex-connector.js";
+import { NativeLoginCredentialResolver } from "../adapters/authentication/native-login-credential-resolver.js";
 import { ClaudeRuntimeAdapter } from "../adapters/runtimes/claude.js";
 import { CodexRuntimeAdapter } from "../adapters/runtimes/codex.js";
 import { JsonAccountStore } from "../adapters/storage/json-account-store.js";
@@ -14,6 +17,8 @@ import type {
   RuntimeContextResolver,
 } from "../core/authentication/contracts.js";
 import { AccountsService } from "../core/accounts/service.js";
+import type { AccountConnector } from "../core/connections/ports.js";
+import { ConnectionsService } from "../core/connections/service.js";
 import { ExecutionService } from "../core/execution/service.js";
 import { RuntimeRegistry } from "../core/execution/runtime-registry.js";
 import { ProjectsService } from "../core/projects/service.js";
@@ -24,6 +29,7 @@ export interface Application {
   readonly projects: ProjectsService;
   readonly sessions: SessionsService;
   readonly execution: ExecutionService;
+  readonly connections: ConnectionsService;
   readonly runtimes: RuntimeRegistry;
   readonly credentials: CredentialResolver;
   readonly runtimeContexts: RuntimeContextResolver;
@@ -37,6 +43,8 @@ export interface CreateApplicationOptions {
   readonly credentials?: CredentialResolver;
   /** Runtime-context implementation supplied by the host or tests. */
   readonly runtimeContexts?: RuntimeContextResolver;
+  /** Provider sign-in connectors; defaults to Codex and Claude. */
+  readonly connectors?: readonly AccountConnector[];
 }
 
 /**
@@ -48,7 +56,10 @@ export interface CreateApplicationOptions {
  */
 export function createApplication(options: CreateApplicationOptions = {}): Application {
   const dataDirectory = options.dataDirectory ?? join(homedir(), ".thinking-and-code");
-  const credentials = options.credentials ?? new InMemoryCredentialResolver();
+  // Accounts connected through a provider sign-in use the provider's own
+  // login in their runtime context; other references fall back to the
+  // supplied (or in-memory) resolver.
+  const credentials = new NativeLoginCredentialResolver(options.credentials ?? new InMemoryCredentialResolver());
   const runtimeContexts = options.runtimeContexts ?? new DirectoryRuntimeContextResolver(
     join(dataDirectory, "runtime-contexts"),
   );
@@ -68,8 +79,15 @@ export function createApplication(options: CreateApplicationOptions = {}): Appli
     runtimes,
   );
 
+  const connections = new ConnectionsService(
+    accounts,
+    runtimeContexts,
+    options.connectors ?? [new CodexConnector(), new ClaudeConnector()],
+  );
+
   return {
     accounts,
+    connections,
     projects,
     sessions,
     execution,

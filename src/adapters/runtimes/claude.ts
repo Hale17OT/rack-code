@@ -44,6 +44,16 @@ export class ClaudeRuntimeAdapter implements RuntimeAdapter {
     };
   }
 
+  describePermissionMode(mode: PermissionMode): string {
+    const permission = claudePermission(mode);
+    if (permission.bypass) {
+      return `SDK permission mode '${permission.mode}' with dangerous-skip allowed; no approval prompts.`;
+    }
+    return permission.approvals
+      ? `SDK permission mode '${permission.mode}'; tool use is routed through the app approval prompt.`
+      : `SDK permission mode '${permission.mode}'; the agent plans without executing tools.`;
+  }
+
   startRun(input: RuntimeRunInput): AsyncIterable<RuntimeEvent> {
     return this.run(input);
   }

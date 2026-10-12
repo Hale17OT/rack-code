@@ -1,0 +1,37 @@
+/**
+ * Renderer bootstrap: builds the store, controller, and feature panels, then
+ * connects to the host.
+ *
+ * Features are mounted explicitly here, mirroring the application's startup
+ * composition: adding a panel means writing a `mount*` function and calling
+ * it from this file. Features never discover each other; the only
+ * cross-feature imports are explicit sub-views (settings hosts the accounts
+ * pane, and the session view hosts inline run details).
+ */
+import { Controller } from "./controller.js";
+import { mountComposer } from "./features/composer.js";
+import { mountNavigator } from "./features/navigator.js";
+import { mountSessionView } from "./features/session-view.js";
+import { mountSettings } from "./features/settings.js";
+import { mountShell } from "./features/shell.js";
+import { mountWorkbench } from "./features/workbench.js";
+import { createHostClient } from "./host-client.js";
+import { Store } from "./store.js";
+
+const root = document.getElementById("app");
+if (root === null) {
+  throw new Error("Missing #app root element.");
+}
+
+const store = new Store();
+const controller = new Controller(createHostClient(), store);
+
+const regions = mountShell(root, store, controller);
+mountNavigator(regions.navigator, store, controller);
+mountSessionView(regions.session, regions.sessionHeader, store, controller);
+mountComposer(regions.composer, store, controller);
+mountWorkbench(regions.workbench, store, regions.isWorkbenchVisible);
+mountSettings(regions.overlay, store, controller);
+
+controller.loadPreferences();
+void controller.start();

@@ -4,7 +4,14 @@ import type { AccountsService } from "../accounts/service.js";
 import type { AccountRecord } from "../accounts/types.js";
 import type { ProjectsService } from "../projects/service.js";
 import type { SessionsService } from "../sessions/service.js";
-import { ApprovalNotFoundError, RunNotFoundError } from "./errors.js";
+import { AccountProviderMismatchError } from "../accounts/errors.js";
+import {
+  ApprovalNotFoundError,
+  AttemptNotFoundError,
+  NoEligibleAccountError,
+  RunNotFoundError,
+  WorkspaceProjectMismatchError,
+} from "./errors.js";
 import type { ExecutionStore } from "./ports.js";
 import { AsyncQueue } from "../shared/async-queue.js";
 import { RuntimeRegistry } from "./runtime-registry.js";
@@ -12,6 +19,7 @@ import type {
   ApprovalDecision,
   ApprovalRequest,
   AttemptRecord,
+  JournalEntry,
   PermissionMode,
   RunRecord,
   RuntimeEvent,
@@ -72,7 +80,7 @@ export class ExecutionService {
     const account = await this.resolveAccount(input);
     const workspace = await this.projects.getWorkspace(input.workspaceId);
     if (workspace.projectId !== input.projectId) {
-      throw new Error(`Workspace '${input.workspaceId}' does not belong to project '${input.projectId}'.`);
+      throw new WorkspaceProjectMismatchError(input.workspaceId, input.projectId);
     }
     const runtime = this.runtimes.get(input.runtimeId);
     const runId = this.createId();
@@ -178,19 +186,42 @@ export class ExecutionService {
     return run;
   }
 
+  /** Lists one session's runs oldest first, matching transcript order. */
+  async listRuns(sessionId: string): Promise<readonly RunRecord[]> {
+    const runs = await this.store.listRuns(sessionId);
+    return [...runs].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
+  async getAttempt(attemptId: string): Promise<AttemptRecord> {
+    const attempt = await this.store.getAttempt(attemptId);
+    if (attempt === undefined) {
+      throw new AttemptNotFoundError(attemptId);
+    }
+    return attempt;
+  }
+
+  /**
+   * Returns the append-only journal for one run in sequence order. Clients
+   * use it to rebuild a transcript after reconnecting instead of restarting
+   * the attempt.
+   */
+  async listJournal(runId: string): Promise<readonly JournalEntry[]> {
+    await this.getRun(runId);
+    const entries = await this.store.listJournal(runId);
+    return [...entries].sort((left, right) => left.sequence - right.sequence);
+  }
+
   private async resolveAccount(input: StartRunInput): Promise<AccountRecord> {
     if (input.accountId !== undefined) {
       const account = await this.accounts.get(input.accountId);
       if (account.providerId !== input.providerId) {
-        throw new Error(
-          `Account '${account.id}' belongs to '${account.providerId}', not '${input.providerId}'.`,
-        );
+        throw new AccountProviderMismatchError(account.id, input.providerId, account.providerId);
       }
       return account;
     }
     const account = await this.accounts.chooseEligible(input.providerId);
     if (account === undefined) {
-      throw new Error(`No eligible account is available for provider '${input.providerId}'.`);
+      throw new NoEligibleAccountError(input.providerId);
     }
     return account;
   }

@@ -70,6 +70,13 @@ export interface RuntimeAdapter {
   startRun(input: RuntimeRunInput): AsyncIterable<RuntimeEvent>;
   resumeRun(input: RuntimeRunInput): AsyncIterable<RuntimeEvent>;
   cancel(input: Pick<RuntimeRunInput, "attemptId" | "signal">): Promise<void>;
+  /**
+   * Human-readable description of the native controls this adapter applies
+   * for an application permission mode. The same app mode maps to different
+   * provider settings, so clients display this text instead of inferring the
+   * mapping from a provider or runtime name.
+   */
+  describePermissionMode(mode: PermissionMode): string;
 }
 
 export interface RunRecord {

@@ -10,9 +10,18 @@
     "noUncheckedIndexedAccess": true,
     "declaration": true,
     "sourceMap": true,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist"]
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "dist-desktop",
+    "src/desktop/renderer"
+  ]
 }
