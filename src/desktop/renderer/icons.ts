@@ -62,6 +62,7 @@ import SlidersHorizontal from "@phosphor-icons/core/assets/regular/sliders-horiz
 import PaintBrush from "@phosphor-icons/core/assets/regular/paint-brush.svg";
 import Robot from "@phosphor-icons/core/assets/regular/robot.svg";
 import Database from "@phosphor-icons/core/assets/regular/database.svg";
+import Copy from "@phosphor-icons/core/assets/regular/copy.svg";
 import SidebarSimple from "@phosphor-icons/core/assets/regular/sidebar-simple.svg";
 import Globe from "@phosphor-icons/core/assets/regular/globe.svg";
 import Files from "@phosphor-icons/core/assets/regular/files.svg";
@@ -124,6 +125,7 @@ const ICONS = {
   "paint-brush": PaintBrush,
   "robot": Robot,
   "database": Database,
+  "copy": Copy,
   "sidebar-simple": SidebarSimple,
   "globe": Globe,
   "files": Files,

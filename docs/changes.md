@@ -1,5 +1,12 @@
 # Change log
 
+## 2026-10-13 - Restore the chat transcript after the model picker merge
+
+- The merge of the model picker branch (`0b131ec`) resolved the renderer conflicts in favor of that branch, which predated the chat transcript, so the session view and its styles fell back to run cards. Reapplied the chat transcript (prompt bubbles, Markdown replies, meta row, tool rows, turn navigator, "Scroll to end") on top of the merged state.
+- Kept the model picker branch's behavior: thinking traces render as a collapsed "Thinking" row in the tool-row style, pending approvals stay in the composer overlay instead of the transcript, user-message metadata stays hidden, and the reply meta row no longer shows the runtime because the selected model determines it. Composer, model catalog, host, and adapter code were not changed.
+- Validation performed: `npm run check` passes (41 tests). In the running app with throwaway test data, a session rendered three chat turns (prompt bubbles, the clipped long prompt, Markdown replies, meta rows) and no run cards.
+- Not performed: streaming, thinking rows, tool rows, and the approval overlay during a live run.
+
 ## 2026-10-13 - Unified model selection and composer approval overlay
 
 - Added provider-backed model discovery to the host `models.list` catalog and runtime adapter model contracts. Codex reads the paginated app-server `model/list` catalog and Claude reads Agent SDK `supportedModels()` in an idle, non-persisted query. The host queries every connected account, deduplicates entries, keeps account provenance, reports partial failures, and refreshes after account/workspace changes.
@@ -7,6 +14,13 @@
 - Removed expandable user-message metadata from the transcript, added normalized thinking traces, and kept tool calls visible.
 - Moved pending approval cards out of the transcript into an overlay above the prompt composer. Approvals remain brokered by the host and survive renderer reconnects.
 - Validation performed: `npm run typecheck`, `npm test` (38 tests), and `npm run build:desktop` pass. Live provider execution and a real approval response were not run.
+
+## 2026-10-12 - Simple chat transcript
+
+- Replaced run cards with a Codex/T3-style chat. Prompts are right-aligned bubbles with clipping for long text. Replies are Markdown-rendered page text with a meta row (copy, time, labels, Details, Stop), compact expandable tool rows, inline approval cards, a turn navigator, and a "Scroll to end" pill. Run details moved behind the per-reply Details toggle.
+- Added `markdown.ts`, a pure parser with a DOM renderer that uses text nodes only, and tests for blocks, streaming fences, inline markup, and rejection of non-http links.
+- Validation performed: `npm run check` passes (37 tests). In the running app, a session with completed turns in the throwaway test data rendered prompt bubbles, the clipped long prompt, inline code, bold, a numbered list, a code block, and meta rows.
+- Not performed: streaming, tool rows, and approvals during a live run.
 
 ## 2026-10-12 - Connect Codex and Claude accounts
 
