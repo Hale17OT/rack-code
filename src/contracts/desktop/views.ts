@@ -19,6 +19,7 @@ import type {
   RunRecord,
   RuntimeCapabilities,
   RuntimeEvent,
+  RuntimeModel,
 } from "../../core/execution/types.js";
 import type { ProjectRecord, WorkspaceRecord } from "../../core/projects/types.js";
 import type { ConnectView } from "../../core/connections/types.js";
@@ -31,6 +32,7 @@ export type {
   PermissionMode,
   RuntimeCapabilities,
   RuntimeEvent,
+  RuntimeModel,
 };
 
 export const PERMISSION_MODES: readonly PermissionMode[] = [
@@ -85,11 +87,26 @@ export interface RunView extends RunRecord {
 export type AttemptView = AttemptRecord;
 export type JournalEntryView = JournalEntry;
 
-/** Runtime picker entry. Capabilities are loaded per account. */
+/** Runtime metadata retained for permission disclosures and host diagnostics. */
 export interface RuntimeView {
   readonly runtimeId: string;
+  readonly providerId?: string;
   /** Adapter-reported native controls for each app permission mode. */
   readonly permissionMappings: Readonly<Record<PermissionMode, string>>;
+}
+
+/** Model picker entry. Runtime/provider routing is deliberately hidden from the UI. */
+export interface ModelView extends RuntimeModel {
+  readonly runtimeId: string;
+  readonly providerName: string;
+  /** Accounts whose native catalogs included this model; never contains credentials. */
+  readonly accountIds: readonly string[];
+}
+
+/** Partial discovery failures must not hide another connected provider's models. */
+export interface ModelCatalogView {
+  readonly models: readonly ModelView[];
+  readonly failures: readonly { readonly providerName: string; readonly accountId: string }[];
 }
 
 /**

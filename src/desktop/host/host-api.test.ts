@@ -11,6 +11,8 @@ import type {
   RuntimeAdapter,
   RuntimeCapabilities,
   RuntimeEvent,
+  RuntimeModel,
+  RuntimeModelInput,
   RuntimeRunInput,
 } from "../../core/execution/types.js";
 import { InMemoryProjectStore } from "../../core/projects/in-memory-store.js";
@@ -26,6 +28,18 @@ import { HostApi } from "./host-api.js";
 /** Runtime that asks for one approval, then completes. */
 class ApprovalRuntime implements RuntimeAdapter {
   readonly runtimeId: string = "approval-runtime";
+  readonly providerId = "fake";
+
+  async models(input: RuntimeModelInput): Promise<readonly RuntimeModel[]> {
+    if (input.account.credential.id === "catalog-fail") throw new Error("catalog unavailable");
+    return [{
+      id: "fake-model",
+      label: "Fake Model",
+      providerId: "fake",
+      description: "A model supplied by the fake provider.",
+      isDefault: true,
+    }] as const;
+  }
 
   async capabilities(_account: RuntimeAccountContext): Promise<RuntimeCapabilities> {
     return { resume: true, fork: false, approvals: true, quotaReporting: false, browserTools: false, computerUse: false };
@@ -53,6 +67,10 @@ class ApprovalRuntime implements RuntimeAdapter {
 /** Runtime that blocks until cancelled. */
 class BlockingRuntime extends ApprovalRuntime {
   override readonly runtimeId = "blocking-runtime";
+
+  override async models(_input: RuntimeModelInput): Promise<readonly RuntimeModel[]> {
+    return [];
+  }
 
   override async *startRun(input: RuntimeRunInput): AsyncIterable<RuntimeEvent> {
     yield { type: "native_session", nativeSessionId: "native-2" };
@@ -182,6 +200,31 @@ test("runtimes report adapter permission mappings", async () => {
   assert.equal(runtimes[0]?.permissionMappings["read_only"], "native read_only");
   const capabilities = await call<{ approvals: boolean }>("runtimes.capabilities", { runtimeId: "approval-runtime", accountId: account.id });
   assert.equal(capabilities.approvals, true);
+});
+
+test("model catalog combines accounts and reports partial discovery failures", async () => {
+  const { call, account, workspace } = await setup();
+  const second = await call<{ id: string }>("accounts.register", {
+    providerId: "fake",
+    providerAccountId: "user-2",
+    credential: { id: "cred-2", providerId: "fake", method: "token" },
+    runtimeContextId: "ctx-2",
+  });
+  const failed = await call<{ id: string }>("accounts.register", {
+    providerId: "fake",
+    providerAccountId: "user-3",
+    credential: { id: "catalog-fail", providerId: "fake", method: "token" },
+    runtimeContextId: "ctx-3",
+  });
+
+  const catalog = await call<{
+    models: Array<{ id: string; accountIds: string[]; runtimeId: string }>;
+    failures: Array<{ accountId: string }>;
+  }>("models.list", { workspaceId: workspace.id });
+  assert.deepEqual(catalog.models.map((model) => model.id), ["fake-model"]);
+  assert.deepEqual(catalog.models[0]?.accountIds.sort(), [account.id, second.id].sort());
+  assert.equal(catalog.models[0]?.runtimeId, "approval-runtime");
+  assert.deepEqual(catalog.failures, [{ providerName: "Fake", accountId: failed.id }]);
 });
 
 test("a run streams indexed events, parks approvals for any client, and finishes", async () => {

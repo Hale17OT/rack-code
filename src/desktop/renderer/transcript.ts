@@ -12,16 +12,19 @@
  * - a `tool_result` is paired with the most recent tool request that has no
  *   result yet. Runtime events carry no tool-call ID, so pairing is
  *   positional; an unpaired result is shown on its own rather than dropped;
- * - unknown structured input/output is kept as data for an expandable view;
+ * - thinking deltas are folded into a separate trace so they never become
+ *   ordinary assistant text;
+ * - approval requests are intentionally omitted here. The host keeps them in
+ *   `pendingApprovals` and the composer renders them above the prompt.
  * - usage fields that were not reported stay `undefined`, never zero.
  */
-import type { ApprovalRequest, RuntimeEvent } from "../../contracts/desktop/views.js";
+import type { RuntimeEvent } from "../../contracts/desktop/views.js";
 
 export type TranscriptItem =
   | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "thinking"; readonly text: string }
   | { readonly kind: "tool"; readonly tool: string; readonly input: unknown; readonly output?: unknown; readonly hasOutput: boolean }
   | { readonly kind: "tool_output"; readonly output: unknown }
-  | { readonly kind: "approval"; readonly request: ApprovalRequest }
   | { readonly kind: "status"; readonly label: string; readonly detail?: string };
 
 export interface UsageSummary {
@@ -49,6 +52,13 @@ export function applyEvent(state: TranscriptState, event: RuntimeEvent): Transcr
       }
       return { ...state, items: [...state.items, { kind: "text", text: event.text }] };
     }
+    case "thinking_delta": {
+      const last = state.items.at(-1);
+      if (last?.kind === "thinking") {
+        return { ...state, items: [...state.items.slice(0, -1), { kind: "thinking", text: last.text + event.text }] };
+      }
+      return { ...state, items: [...state.items, { kind: "thinking", text: event.text }] };
+    }
     case "tool_request":
       return {
         ...state,
@@ -65,7 +75,8 @@ export function applyEvent(state: TranscriptState, event: RuntimeEvent): Transcr
       return { ...state, items };
     }
     case "approval_request":
-      return { ...state, items: [...state.items, { kind: "approval", request: event.request }] };
+      // Approval UI belongs to the composer overlay, not the conversation.
+      return state;
     case "native_session":
       // Diagnostic association only; shown in run details, not the transcript.
       return { ...state, nativeSessionId: event.nativeSessionId };

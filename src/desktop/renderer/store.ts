@@ -24,6 +24,7 @@ import type {
   RuntimeCapabilities,
   RuntimeEvent,
   RuntimeView,
+  ModelView,
   SessionSummaryView,
   SessionView,
   JournalEntryView,
@@ -56,6 +57,9 @@ export interface AppState {
   readonly host: { readonly status: "connecting" | "ready" | "exited"; readonly detail?: string };
   readonly accounts: readonly AccountView[];
   readonly runtimes: readonly RuntimeView[];
+  /** Unified model catalog; each entry carries hidden host routing metadata. */
+  readonly models: readonly ModelView[];
+  readonly modelCatalogFailures: readonly { readonly providerName: string; readonly accountId: string }[];
   readonly projects: readonly ProjectView[];
   /** Workspaces of the selected project. */
   readonly workspaces: readonly WorkspaceView[];
@@ -93,6 +97,8 @@ export const INITIAL_STATE: AppState = {
   host: { status: "connecting" },
   accounts: [],
   runtimes: [],
+  models: [],
+  modelCatalogFailures: [],
   projects: [],
   workspaces: [],
   sessions: [],

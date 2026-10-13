@@ -46,11 +46,12 @@ export class Controller {
       }
     });
     try {
-      const [connectProviders, connecting, accounts, runtimes, projects, sessions, active] = await Promise.all([
+      const [connectProviders, connecting, accounts, runtimes, models, projects, sessions, active] = await Promise.all([
         this.host.call("auth.providers", {}),
         this.host.call("auth.active", {}),
         this.host.call("accounts.list", {}),
         this.host.call("runtimes.list", {}),
+        this.host.call("models.list", {}),
         this.host.call("projects.list", {}),
         this.host.call("sessions.list", {}),
         this.host.call("runs.active", {}),
@@ -60,6 +61,8 @@ export class Controller {
         host: { status: "ready" },
         accounts,
         runtimes,
+        models: models.models,
+        modelCatalogFailures: models.failures,
         projects,
         sessions,
         connectProviders,
@@ -113,6 +116,7 @@ export class Controller {
     await Promise.all([
       this.reloadSession(sessionId),
       projectChanged && projectId !== undefined ? this.reloadWorkspaces(projectId) : Promise.resolve(),
+      this.reloadModels(),
     ]);
   }
 
@@ -388,6 +392,7 @@ export class Controller {
         return;
       case "accounts.changed":
         void this.reloadAccounts();
+        void this.reloadModels();
         return;
       case "projects.changed":
         void this.reloadProjects();
@@ -471,6 +476,19 @@ export class Controller {
     return this.coalesce("accounts", async () => {
       const accounts = await this.host.call("accounts.list", {});
       this.store.update((state) => ({ ...state, accounts }));
+    });
+  }
+
+  /** Refreshes provider-backed models after account or workspace changes. */
+  private reloadModels(): Promise<void> {
+    return this.coalesce("models", async () => {
+      const workspaceId = this.store.get().session?.workspaceId;
+      const models = await this.host.call("models.list", workspaceId === undefined ? {} : { workspaceId });
+      this.store.update((state) => ({
+        ...state,
+        models: models.models,
+        modelCatalogFailures: models.failures,
+      }));
     });
   }
 

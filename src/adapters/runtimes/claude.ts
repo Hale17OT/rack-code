@@ -2,6 +2,7 @@ import {
   query,
   type Options,
   type PermissionResult,
+  type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 
 import type {
@@ -14,8 +15,11 @@ import type {
   RuntimeAdapter,
   RuntimeCapabilities,
   RuntimeEvent,
+  RuntimeModel,
+  RuntimeModelInput,
   RuntimeRunInput,
 } from "../../core/execution/types.js";
+import { AsyncQueue } from "../../core/shared/async-queue.js";
 
 /**
  * Claude Agent SDK adapter.
@@ -26,12 +30,54 @@ import type {
  */
 export class ClaudeRuntimeAdapter implements RuntimeAdapter {
   readonly runtimeId = "claude-agent-sdk";
+  readonly providerId = "claude";
   private readonly activeQueries = new Map<string, ReturnType<typeof query>>();
 
   constructor(
     private readonly credentials: CredentialResolver,
     private readonly contexts: RuntimeContextResolver,
+    private readonly createQuery: typeof query = query,
   ) {}
+
+  /**
+   * Initialize an idle SDK query and ask for its account-specific catalog.
+   * The input queue never receives a user message, so this cannot start a
+   * model turn or execute tools. Completion/timeout always closes the queue
+   * and child process; discovery does not create a persisted session.
+   */
+  async models(input: RuntimeModelInput): Promise<readonly RuntimeModel[]> {
+    const credential = await this.credentials.resolve(input.account.credential);
+    const context = await this.contexts.resolve(input.account.runtimeContextId);
+    const prompts = new AsyncQueue<SDKUserMessage>();
+    const abortController = new AbortController();
+    let discovery: ReturnType<typeof query> | undefined;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      discovery = this.createQuery({
+        prompt: prompts,
+        options: {
+          cwd: input.workspacePath ?? context.directory,
+          env: {
+            ...stringEnvironment(process.env, new Set(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"])),
+            ...context.environment, ...credential.environment, CLAUDE_CONFIG_DIR: context.directory,
+          },
+          abortController, persistSession: false, permissionMode: "plan",
+        },
+      });
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("Claude model discovery timed out.")), 15_000);
+      });
+      const entries = await Promise.race([discovery.supportedModels(), timeout]);
+      return entries.filter((entry) => entry.value.trim() !== "").map((entry) => ({
+        id: entry.value, label: entry.displayName, description: entry.description, providerId: this.providerId,
+      }));
+    } finally {
+      clearTimeout(timer);
+      prompts.complete();
+      discovery?.close();
+      abortController.abort();
+    }
+  }
 
   async capabilities(_account: RuntimeAccountContext): Promise<RuntimeCapabilities> {
     return {
@@ -97,7 +143,7 @@ export class ClaudeRuntimeAdapter implements RuntimeAdapter {
     let activeQuery: ReturnType<typeof query> | undefined;
     try {
       const options = this.options(input, environment, sdkAbort);
-      activeQuery = query({ prompt: input.prompt, options });
+      activeQuery = this.createQuery({ prompt: input.prompt, options });
       this.activeQueries.set(input.attemptId, activeQuery);
       for await (const rawMessage of activeQuery) {
         const message: unknown = rawMessage;
@@ -191,6 +237,10 @@ function mapClaudeMessage(message: unknown): RuntimeEvent[] {
         const text = stringField(block, "text");
         return text === undefined ? [] : [{ type: "message_delta", text }];
       }
+      if (blockType === "thinking") {
+        const text = stringField(block, "thinking");
+        return text === undefined ? [] : [{ type: "thinking_delta", text }];
+      }
       if (blockType === "tool_use") {
         return [{
           type: "tool_request",
@@ -200,6 +250,15 @@ function mapClaudeMessage(message: unknown): RuntimeEvent[] {
       }
       return [];
     });
+  }
+  if (type === "stream_event") {
+    const event = recordField(message, "event");
+    const delta = recordField(event, "delta");
+    const deltaType = stringField(delta, "type");
+    const text = stringField(delta, "thinking") ?? stringField(delta, "text");
+    if ((deltaType === "thinking_delta" || deltaType === "text_delta") && text !== undefined) {
+      return [{ type: deltaType === "thinking_delta" ? "thinking_delta" : "message_delta", text }];
+    }
   }
   if (type === "user") {
     const content = arrayField(recordField(message, "message"), "content");

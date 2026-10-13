@@ -1,6 +1,6 @@
 # Headless MVP
 
-Status: implemented 2026-10-12. The headless API remains the core; the Electron desktop UI built on it is described in [desktop application](desktop.md).
+Status: implemented 2026-10-13. The headless API remains the core; the Electron desktop UI built on it is described in [desktop application](desktop.md).
 
 The composition entry point is `createApplication` from `src/index.ts`. It assembles JSON-file stores under one data directory, the Accounts, Projects, Sessions, and Execution services, an isolated runtime-context resolver, and both first-class runtime adapters:
 
@@ -18,6 +18,8 @@ The headless flow is:
 5. Answer a pending approval with `handle.respondToApproval(id, "allow" | "deny")`, or call `handle.cancel()` to interrupt the attempt. Await `handle.completed` for the durable run outcome.
 
 The application owns run, attempt, session, workspace-lock, and append-only journal records. Native Codex thread IDs and Claude session IDs are continuations below an application session. A new attempt selects an explicitly requested account or the Accounts service's eligible account; an unavailable selected account falls back to the most recently used available account for that provider. Active attempts keep their original account.
+
+The desktop host exposes `models.list` as the source of truth for model selection. It asks each connected account's runtime adapter for its catalog in the selected workspace, deduplicates models while retaining the accounts that reported them, and returns partial failures separately. The renderer offers those entries in a grouped list with hidden provider/runtime routing; it never asks users to type a model ID or choose a runtime.
 
 Permission mappings are explicit:
 

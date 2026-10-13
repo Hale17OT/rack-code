@@ -1,6 +1,6 @@
 # Architecture
 
-Status: evolving architecture with the headless MVP foundation and first desktop UI implemented, updated 2026-10-12.
+Status: evolving architecture with the headless MVP foundation and first desktop UI implemented, updated 2026-10-13.
 
 This document is the architecture entry point required by [AGENTS.md](../AGENTS.md). It captures the agreed product direction and the boundaries used by the implemented headless MVP and desktop UI. Background hosting, browser integration, timeline, retrospective, orchestration, and isolated parallel work remain follow-on work.
 
@@ -86,7 +86,20 @@ The implemented shared runtime contract uses these operations and values:
 - `RuntimeAdapter.cancelRun(attemptId)` requests interruption and reports whether the provider acknowledged it.
 - `RuntimeAdapter.describePermissionMode(mode)` returns adapter-owned text describing the native controls used for an application permission mode, so clients disclose the mapping without provider-name conditionals.
 - `RuntimeAdapter.capabilities(accountId)` returns explicit support flags for resume, fork, approvals, quota reporting, browser tools, computer use, and other optional behavior.
-- The adapter emits normalized application events such as `message_delta`, `tool_request`, `tool_result`, `approval_request`, `usage`, `completed`, `failed`, and `interrupted`.
+- The adapter emits normalized application events such as `message_delta`, `thinking_delta`, `tool_request`, `tool_result`, `approval_request`, `usage`, `completed`, `failed`, and `interrupted`.
+
+Runtime adapters may also expose a model catalog through the application-owned
+`RuntimeModel` contract. The desktop host composes those entries into one
+`models.list` response by querying every connected account for that provider.
+Catalog entries are deduplicated per provider/runtime/model ID while retaining
+the account IDs that reported each model; a failure for one account is
+returned as a partial discovery failure instead of hiding another account's
+models. Discovery uses the selected workspace path when one is available and
+never starts a model turn. Each model retains its provider and runtime routing
+metadata in the host contract, while the renderer presents only the model
+name, provider grouping, and description in a list-only picker. Selecting a
+model therefore chooses the correct adapter without exposing a Claude/Codex
+runtime switch or a free-form model input.
 
 The Codex adapter translates these operations into app-server initialization, thread, turn, notification, approval, and interruption messages. The Claude adapter translates them into Agent SDK query, session, permission, and streaming operations. Core execution handles the normalized operations and events without checking which provider produced them. A provider-specific feature is exposed as a capability or an explicitly named adapter extension; it is not implemented as a provider-name conditional in core code or the renderer. The concrete implementation and deferred behavior are recorded in [MVP implementation](mvp.md).
 

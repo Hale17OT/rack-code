@@ -1,18 +1,12 @@
 # Change log
 
-## 2026-10-12 - Simple chat transcript
+## 2026-10-13 - Unified model selection and composer approval overlay
 
-- Replaced run cards with a Codex/T3-style chat. Prompts are right-aligned bubbles with clipping for long text. Replies are Markdown-rendered page text with a meta row (copy, time, labels, Details, Stop), compact expandable tool rows, inline approval cards, a turn navigator, and a "Scroll to end" pill. Run details moved behind the per-reply Details toggle.
-- Added `markdown.ts`, a pure parser with a DOM renderer that uses text nodes only, and tests for blocks, streaming fences, inline markup, and rejection of non-http links.
-- Validation performed: `npm run check` passes (37 tests). In the running app, a session with completed turns in the throwaway test data rendered prompt bubbles, the clipped long prompt, inline code, bold, a numbered list, a code block, and meta rows.
-- Not performed: streaming, tool rows, and approvals during a live run.
-
-## 2026-10-12 - Verify desktop integration on `feat/minimal-desktop-ui`
-
-- Checked out and validated the desktop branch with the renderer, preload bridge, Electron main process, execution host, and composed application running together.
-- Exercised the real bridge to create a project, workspace, and session; confirmed the composer becomes available after selecting a session; opened the Accounts settings; and started and cancelled the Codex sign-in flow.
-- Validation performed: `npm run check` passes (typecheck, build, 34 tests, and desktop bundle), the packaged Electron window launches on a clean debugging port, and the live renderer reported no page errors or console errors.
-- Not performed: completing a real Codex or Claude sign-in, or running an agent with a connected subscription account.
+- Added provider-backed model discovery to the host `models.list` catalog and runtime adapter model contracts. Codex reads the paginated app-server `model/list` catalog and Claude reads Agent SDK `supportedModels()` in an idle, non-persisted query. The host queries every connected account, deduplicates entries, keeps account provenance, reports partial failures, and refreshes after account/workspace changes.
+- The composer now presents a list-only Claude/Codex model catalog, routes the selected model to its owning provider/runtime internally, filters account choices to that provider, and explains empty or partial discovery results. There is no runtime picker or free-form model editor.
+- Removed expandable user-message metadata from the transcript, added normalized thinking traces, and kept tool calls visible.
+- Moved pending approval cards out of the transcript into an overlay above the prompt composer. Approvals remain brokered by the host and survive renderer reconnects.
+- Validation performed: `npm run typecheck`, `npm test` (38 tests), and `npm run build:desktop` pass. Live provider execution and a real approval response were not run.
 
 ## 2026-10-12 - Connect Codex and Claude accounts
 
@@ -42,7 +36,7 @@
 ## 2026-10-12 - Restructure the desktop UI layout
 
 - Replaced every native `<select>` with a custom, keyboard-accessible dropdown (`components/dropdown.ts`) rendered in a shared popover (`components/popover.ts`).
-- Rebuilt the composer as one card: an auto-growing prompt and a toolbar of pill menus (permission, runtime, account, model) plus a round send button that becomes a stop button while the session has an active run. Capabilities and native permission mappings moved into the menu option descriptions. Enter now sends.
+- Rebuilt the composer as one card: an auto-growing prompt and a toolbar of pill menus (permission, account, model) plus a round send button that becomes a stop button while the session has an active run. Capabilities and native permission mappings moved into the menu option descriptions. Enter now sends.
 - The sidebar's upper part is now a sessions tree grouped under project folders, with inline new-session forms and running spinners. Workspaces of the current project are below it, and Settings is at the bottom. The project form can optionally add a shared workspace at the root path; this is an explicit checkbox, not an implicit policy.
 - The right panel is now reserved for code changes, diffs, and plugins, and shows empty states. Run details expand inline in the transcript instead of in the right panel.
 - Added a Settings overlay. General holds the Light/Dark/System appearance choice, Accounts holds account management, and Permissions, Plugins, Shortcuts, Notifications, About, Startup, and Exit behavior are labelled placeholders.

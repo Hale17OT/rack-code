@@ -30,6 +30,7 @@ import {
   type RunView,
   type RuntimeCapabilities,
   type RuntimeView,
+  type ModelCatalogView,
   type SessionSummaryView,
   type SessionView,
   type StartRunResult,
@@ -107,6 +108,7 @@ export interface HostCommandMap {
   };
   "sessions.get": { params: { readonly sessionId: string }; result: SessionView };
   "runtimes.list": { params: NoParams; result: readonly RuntimeView[] };
+  "models.list": { params: { readonly workspaceId?: string }; result: ModelCatalogView };
   "runtimes.capabilities": {
     params: { readonly runtimeId: string; readonly accountId: string };
     result: RuntimeCapabilities;
@@ -160,6 +162,7 @@ export const COMMAND_VALIDATORS: { readonly [C in HostCommand]: Validator<Comman
   "sessions.create": object({ projectId: id, workspaceId: id, title: optional(text({ maxLength: 256 })) }),
   "sessions.get": object({ sessionId: id }),
   "runtimes.list": empty,
+  "models.list": object({ workspaceId: optional(id) }),
   "runtimes.capabilities": object({ runtimeId: id, accountId: id }),
   "runs.start": object({
     sessionId: id,

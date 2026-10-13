@@ -14,6 +14,17 @@ test("adjacent message deltas are coalesced; tools break the run of text", () =>
   assert.equal(state.items[0]?.kind === "text" && state.items[0].text, "Hello");
 });
 
+test("thinking deltas are folded into a separate trace and approvals stay out of chat", () => {
+  const state = foldEvents([
+    { type: "thinking_delta", text: "check " },
+    { type: "thinking_delta", text: "the file" },
+    { type: "approval_request", request: { id: "approval-1", tool: "shell", input: {} } },
+    { type: "message_delta", text: "Ready" },
+  ]);
+  assert.deepEqual(state.items.map((item) => item.kind), ["thinking", "text"]);
+  assert.equal(state.items[0]?.kind === "thinking" && state.items[0].text, "check the file");
+});
+
 test("tool results pair with the latest unanswered request; unpaired results are kept", () => {
   const state = foldEvents([
     { type: "tool_result", output: "orphan" },

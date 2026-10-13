@@ -184,8 +184,52 @@ export class HostApi {
         const permissionMappings = Object.fromEntries(
           PERMISSION_MODES.map((mode) => [mode, runtime.describePermissionMode(mode)]),
         ) as Record<PermissionMode, string>;
-        return { runtimeId, permissionMappings };
+        return { runtimeId, ...(runtime.providerId === undefined ? {} : { providerId: runtime.providerId }), permissionMappings };
       }),
+      "models.list": async (params) => {
+        // Discovery runs in the selected workspace when one is available so
+        // providers see the same working directory that a subsequent run
+        // will use. The catalog remains account-scoped and never receives
+        // renderer credentials or provider SDK objects.
+        const workspacePath = params.workspaceId === undefined
+          ? undefined
+          : (await projects.getWorkspace(params.workspaceId)).path;
+        const providerNames = new Map(connections.providers().map((provider) => [provider.providerId, provider.displayName]));
+        const accountsByProvider = new Map<string, AccountRecord[]>();
+        for (const account of await accounts.list()) {
+          const list = accountsByProvider.get(account.providerId) ?? [];
+          list.push(account);
+          accountsByProvider.set(account.providerId, list);
+        }
+        const models = new Map<string, { readonly model: import("../../core/execution/types.js").RuntimeModel; readonly runtimeId: string; readonly accountIds: string[] }>();
+        const failures: { readonly providerName: string; readonly accountId: string }[] = [];
+        for (const runtimeId of runtimes.list()) {
+          const runtime = runtimes.get(runtimeId);
+          if (runtime.models === undefined || runtime.providerId === undefined) continue;
+          for (const account of accountsByProvider.get(runtime.providerId) ?? []) {
+            try {
+              const entries = await runtime.models({
+                account: { accountId: account.id, providerId: account.providerId, credential: account.credential, runtimeContextId: account.runtimeContextId },
+                ...(workspacePath === undefined ? {} : { workspacePath }),
+              });
+              for (const model of entries) {
+                const key = `${runtimeId}|${model.providerId}|${model.id}`;
+                const current = models.get(key);
+                if (current === undefined) models.set(key, { model, runtimeId, accountIds: [account.id] });
+                else if (!current.accountIds.includes(account.id)) current.accountIds.push(account.id);
+              }
+            } catch {
+              failures.push({ providerName: providerNames.get(account.providerId) ?? account.providerId, accountId: account.id });
+            }
+          }
+        }
+        return {
+          models: [...models.values()].map(({ model, runtimeId, accountIds }) => ({
+            ...model, runtimeId, accountIds: [...accountIds], providerName: providerNames.get(model.providerId) ?? model.providerId,
+          })),
+          failures,
+        };
+      },
       "runtimes.capabilities": async (params) => {
         const account = await accounts.get(params.accountId);
         return runtimes.get(params.runtimeId).capabilities({
