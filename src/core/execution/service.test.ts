@@ -55,6 +55,10 @@ class FakeRuntime implements RuntimeAdapter {
     yield { type: "completed", result: "continued" };
   }
 
+  describePermissionMode(mode: string): string {
+    return `fake mapping for ${mode}`;
+  }
+
   async cancel(_input: Pick<RuntimeRunInput, "attemptId" | "signal">): Promise<void> {
     // The fake runtime has no external process to interrupt.
   }

@@ -25,3 +25,27 @@ export class ApprovalNotFoundError extends ExecutionError {
     this.name = "ApprovalNotFoundError";
   }
 }
+
+/** Raised when an attempt record referenced by a run is missing. */
+export class AttemptNotFoundError extends ExecutionError {
+  constructor(attemptId: string) {
+    super(`Attempt '${attemptId}' was not found.`);
+    this.name = "AttemptNotFoundError";
+  }
+}
+
+/** Raised when no explicit account was requested and none is eligible. */
+export class NoEligibleAccountError extends ExecutionError {
+  constructor(providerId: string) {
+    super(`No eligible account is available for provider '${providerId}'.`);
+    this.name = "NoEligibleAccountError";
+  }
+}
+
+/** Raised when a run names a workspace that belongs to a different project. */
+export class WorkspaceProjectMismatchError extends ExecutionError {
+  constructor(workspaceId: string, projectId: string) {
+    super(`Workspace '${workspaceId}' does not belong to project '${projectId}'.`);
+    this.name = "WorkspaceProjectMismatchError";
+  }
+}

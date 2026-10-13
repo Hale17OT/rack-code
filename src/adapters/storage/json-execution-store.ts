@@ -26,6 +26,10 @@ export class JsonExecutionStore implements ExecutionStore {
     return (await this.document.read()).runs.find((run) => run.id === runId);
   }
 
+  async listRuns(sessionId: string): Promise<readonly RunRecord[]> {
+    return (await this.document.read()).runs.filter((run) => run.sessionId === sessionId);
+  }
+
   async saveRun(run: RunRecord): Promise<void> {
     await this.document.update((current) => ({
       ...current,

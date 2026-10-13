@@ -12,6 +12,11 @@ export class RuntimeRegistry {
     this.adapters.set(adapter.runtimeId, adapter);
   }
 
+  /** Registered runtime IDs in registration order for host composition and diagnostics. */
+  list(): readonly string[] {
+    return [...this.adapters.keys()];
+  }
+
   get(runtimeId: string): RuntimeAdapter {
     const adapter = this.adapters.get(runtimeId);
     if (adapter === undefined) {

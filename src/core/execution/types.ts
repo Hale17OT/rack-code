@@ -52,8 +52,25 @@ export interface RuntimeCapabilities {
   readonly computerUse: boolean;
 }
 
+/** A selectable model exposed by a runtime adapter. */
+export interface RuntimeModel {
+  readonly id: string;
+  readonly label: string;
+  readonly providerId: string;
+  readonly description?: string;
+  /** Provider-recommended default; the actual model ID is still sent on execution. */
+  readonly isDefault?: boolean;
+}
+
+/** Discovery uses the same isolated account context as execution, without a model turn. */
+export interface RuntimeModelInput {
+  readonly account: RuntimeAccountContext;
+  readonly workspacePath?: string;
+}
+
 export type RuntimeEvent =
   | { readonly type: "message_delta"; readonly text: string }
+  | { readonly type: "thinking_delta"; readonly text: string }
   | { readonly type: "tool_request"; readonly tool: string; readonly input: unknown }
   | { readonly type: "tool_result"; readonly output: unknown }
   | { readonly type: "approval_request"; readonly request: ApprovalRequest }
@@ -66,10 +83,21 @@ export type RuntimeEvent =
 
 export interface RuntimeAdapter {
   readonly runtimeId: string;
+  /** Stable provider identity used for account selection and model routing. */
+  readonly providerId?: string;
+  /** Discovers selectable models for this account/workspace; rejects on provider failure. */
+  readonly models?: (input: RuntimeModelInput) => Promise<readonly RuntimeModel[]>;
   capabilities(account: RuntimeAccountContext): Promise<RuntimeCapabilities>;
   startRun(input: RuntimeRunInput): AsyncIterable<RuntimeEvent>;
   resumeRun(input: RuntimeRunInput): AsyncIterable<RuntimeEvent>;
   cancel(input: Pick<RuntimeRunInput, "attemptId" | "signal">): Promise<void>;
+  /**
+   * Human-readable description of the native controls this adapter applies
+   * for an application permission mode. The same app mode maps to different
+   * provider settings, so clients display this text instead of inferring the
+   * mapping from a provider or runtime name.
+   */
+  describePermissionMode(mode: PermissionMode): string;
 }
 
 export interface RunRecord {

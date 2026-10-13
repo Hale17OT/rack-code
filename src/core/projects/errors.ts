@@ -20,7 +20,8 @@ export class WorkspaceNotFoundError extends ProjectError {
 }
 
 export class WorkspaceBusyError extends ProjectError {
-  constructor(workspaceId: string, attemptId: string) {
+  /** Exposed so clients can show the owning attempt without parsing text. */
+  constructor(readonly workspaceId: string, readonly attemptId: string) {
     super(`Workspace '${workspaceId}' is already being edited by attempt '${attemptId}'.`);
     this.name = "WorkspaceBusyError";
   }

@@ -1,5 +1,60 @@
 # Change log
 
+## 2026-10-13 - Unified model selection and composer approval overlay
+
+- Added provider-backed model discovery to the host `models.list` catalog and runtime adapter model contracts. Codex reads the paginated app-server `model/list` catalog and Claude reads Agent SDK `supportedModels()` in an idle, non-persisted query. The host queries every connected account, deduplicates entries, keeps account provenance, reports partial failures, and refreshes after account/workspace changes.
+- The composer now presents a list-only Claude/Codex model catalog, routes the selected model to its owning provider/runtime internally, filters account choices to that provider, and explains empty or partial discovery results. There is no runtime picker or free-form model editor.
+- Removed expandable user-message metadata from the transcript, added normalized thinking traces, and kept tool calls visible.
+- Moved pending approval cards out of the transcript into an overlay above the prompt composer. Approvals remain brokered by the host and survive renderer reconnects.
+- Validation performed: `npm run typecheck`, `npm test` (38 tests), and `npm run build:desktop` pass. Live provider execution and a real approval response were not run.
+
+## 2026-10-12 - Connect Codex and Claude accounts
+
+- Added a Connections core module (`src/core/connections/`) with the `AccountConnector` port and `ConnectionsService`. The service allocates a fresh runtime context, runs the provider sign-in there, and registers the account (or re-authenticates an existing account with the same identity onto the new context) with a `native_login` credential reference. It marks the account available and selects it when the provider has no selection.
+- Added `CodexConnector` (app-server `account/login/start` ChatGPT flow) and `ClaudeConnector` (`claude auth login --claudeai` with an isolated `CLAUDE_CONFIG_DIR`), plus `NativeLoginCredentialResolver`, which the composition root now always wraps around the supplied resolver.
+- Host contract: `auth.providers`, `auth.connect`, `auth.submitCode`, `auth.cancel`, `auth.active`, the `auth.updated` event, and the `connector_not_found` and `connect_not_found` codes. Host shutdown cancels sign-ins.
+- UI: Settings, Accounts now shows "Connect Codex account" and "Connect Claude account" buttons, sign-in progress cards (open sign-in page, device code, code field, cancel, try again), and Reconnect on saved accounts. The manual credential-reference forms were removed from the UI; `accounts.register` remains for headless embedders. The composer shows "Connect an account" when no account exists.
+- Validation performed: `npm run check` passes (34 tests, including connect, reconnect, cancel, and error-code tests with a fake connector). A live Codex probe returned a real sign-in URL and cancelled. `claude auth status --json` was checked against an empty isolated directory. The Accounts pane renders both connect buttons.
+- Not performed: completing a real Codex or Claude sign-in, or a run with a connected account. Both need the user's interaction.
+
+## 2026-10-12 - Native folder picker for projects and workspaces
+
+- Creating a project now opens the native folder picker, then a small "New project" dialog pre-filled from the chosen folder (name, path with Browse, root-workspace checkbox). The workspace form's path field also has a Browse button. The empty sidebar state is now an "Add a project folder" button.
+- Added `selectDirectory` to the preload bridge and a `harness:select-directory` IPC channel handled by Electron main, which validates the sender and options and returns only the chosen path. This is a desktop-shell operation, not a host command.
+- Added a reusable modal component (`components/modal.ts`) with Escape, backdrop click, focus trapping, and focus return.
+- Validation performed: `npm run check` passes. In the running app, the folder-plus button opened the native macOS picker titled "Choose project folder", attached to the window.
+- Not performed: choosing a folder in the native dialog and submitting the dialog end to end (it needs manual interaction); testing on Windows or Linux.
+
+## 2026-10-12 - Retractable sidebars, surface launcher, condensed tree
+
+- Both sidebars are retractable from a new slim toolbar that also shows the session title. A collapsed left sidebar reappears on hover at the window's left edge and floats over the content.
+- The right sidebar is now an "Open a surface" launcher with single-key shortcuts. Changes is always listed, and plugin surfaces appear when enabled in the new Settings, Plugins toggles. All plugins are labelled previews with no functionality.
+- The sidebar is now a folder tree with nested, condensed single-line session rows showing relative age, and workspace rows are condensed too. The type scale is smaller throughout (wordmark, titles, and body text).
+- Validation performed: `npm run check` passes. In the running app, checked that enabling Terminal and Timeline lists them in the launcher, that the T shortcut opens the Terminal surface, that collapsing the left sidebar keeps the grid intact, that hover peek reveals the sidebar, and the tree rendering in light and dark.
+- Not performed: a live agent run, so the running spinner was not observed with a real provider; testing on Windows or Linux.
+
+## 2026-10-12 - Restructure the desktop UI layout
+
+- Replaced every native `<select>` with a custom, keyboard-accessible dropdown (`components/dropdown.ts`) rendered in a shared popover (`components/popover.ts`).
+- Rebuilt the composer as one card: an auto-growing prompt and a toolbar of pill menus (permission, account, model) plus a round send button that becomes a stop button while the session has an active run. Capabilities and native permission mappings moved into the menu option descriptions. Enter now sends.
+- The sidebar's upper part is now a sessions tree grouped under project folders, with inline new-session forms and running spinners. Workspaces of the current project are below it, and Settings is at the bottom. The project form can optionally add a shared workspace at the root path; this is an explicit checkbox, not an implicit policy.
+- The right panel is now reserved for code changes, diffs, and plugins, and shows empty states. Run details expand inline in the transcript instead of in the right panel.
+- Added a Settings overlay. General holds the Light/Dark/System appearance choice, Accounts holds account management, and Permissions, Plugins, Shortcuts, Notifications, About, Startup, and Exit behavior are labelled placeholders.
+- Contract change: `sessions.list` accepts an omitted `projectId` to list sessions of every project for the tree.
+- Validation performed: `npm run check` passes (typecheck, build, 31 tests, desktop bundle). In the running app, checked dark and light themes, the theme choice in Settings and its persistence, menus opening upward with grouped and wrapped options, keyboard selection in a dropdown, creating a session from a folder's inline form, the inline run details, and the Accounts pane in Settings.
+- Not performed: a live agent run, so the running spinner and the stop button were not observed with a real provider; testing on Windows or Linux.
+
+## 2026-10-12 - Implement the first desktop UI
+
+- Added the Electron desktop app (see `docs/desktop.md`). Application services run in a separate execution host utility process that owns every in-flight run and pending approval. Electron main validates renderer requests at the privileged boundary and relays them. A two-function preload bridge (`window.harness`) is the renderer's only privileged API.
+- Recorded the user's decisions: a framework-free TypeScript renderer with plain CSS, and a utility-process host chosen for maintainability and future background mode. Updated the architecture technology table and source layout.
+- Added serializable desktop contracts in `src/contracts/desktop/` (typed command map with runtime validators, host events, views, and stable error codes with structured details).
+- Added core read queries for the UI: project, workspace, and session lists, run lists per session, attempt lookup, ordered journal reads, and runtime registry listing. Added typed execution errors (`NoEligibleAccountError`, `WorkspaceProjectMismatchError`, `AttemptNotFoundError`), structured fields on `WorkspaceBusyError` and `DuplicateAccountError`, and `RuntimeAdapter.describePermissionMode` so permission mappings are disclosed by adapters.
+- Renderer: sidebar navigator with a spinning indicator on sessions that have an active run, streaming transcript with tool rows and approval cards, run composer with capability-gated permission modes and an unknown-outcome acknowledgement guard, a run inspector (usage, mappings, recovery details, journal), and account management. It offers Light, Dark, and System appearance, Phosphor icons, and bundled Inter and IBM Plex Mono fonts. There are no status indicator dots.
+- Stop-on-exit: quitting with active runs asks for confirmation, then cancels them through the host and waits up to 10 seconds before terminating it.
+- Validation performed: `npm run check` passes (both TypeScript projects, the headless build, 31 tests including new host-API, contract-validator, and transcript tests, and the desktop bundle). The unpackaged Electron app was launched with an isolated data directory and driven through the real bridge: creating a project, workspace, session, and accounts; duplicate-account and invalid-input errors; starting a run (which failed as expected without credentials); reloading the renderer; switching tabs and appearance; and quitting, after which no Electron or host processes remained.
+- Not performed: a successful live agent run (the host has no credential source yet), the approval and cancellation flows against a real provider, visual verification of the session spinner during a live run (covered by code paths and host tests only), packaging, and testing on Windows or Linux.
+
 ## 2026-10-12 - Implement headless MVP runtimes and composition
 
 - Added account credential replacement for re-authentication, in-memory credential resolution for tests/embedding, and private per-account runtime-context directories.

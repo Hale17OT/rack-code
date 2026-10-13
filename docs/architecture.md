@@ -1,8 +1,8 @@
 # Architecture
 
-Status: evolving architecture with the headless MVP foundation implemented, updated 2026-10-12.
+Status: evolving architecture with the headless MVP foundation and first desktop UI implemented, updated 2026-10-13.
 
-This document is the architecture entry point required by [AGENTS.md](../AGENTS.md). It captures the agreed product direction and the boundaries used by the implemented headless MVP. UI, Electron lifecycle, background hosting, browser integration, timeline, retrospective, orchestration, and isolated parallel work remain follow-on work.
+This document is the architecture entry point required by [AGENTS.md](../AGENTS.md). It captures the agreed product direction and the boundaries used by the implemented headless MVP and desktop UI. Background hosting, browser integration, timeline, retrospective, orchestration, and isolated parallel work remain follow-on work.
 
 ## Product and implementation scope
 
@@ -18,10 +18,10 @@ Implementation proceeds one explicitly approved feature at a time. This document
 | --- | --- | --- |
 | Product language | TypeScript for application code, adapters, UI behavior, and project tooling where practical | Selected by user |
 | Desktop platform | Electron | Selected by user |
-| UI library and styling | Web UI inside Electron; library and styling system undecided | Open |
+| UI library and styling | Framework-free TypeScript renderer with plain CSS, Phosphor icons, bundled Inter and IBM Plex Mono; see [desktop application](desktop.md) | Selected by user 2026-10-12 |
 | Git hooks | Husky | Selected by user; hook policies still to define |
 | Package management and development scripts | npm with Node.js tooling | Selected baseline |
-| Running desktop application | Electron's Node.js environment and Chromium renderer | Selected baseline; application service process placement remains open |
+| Running desktop application | Electron main for lifecycle and IPC validation; application services in a separate Electron utility process (execution host) | Selected by user 2026-10-12; supervision and background mode remain open |
 | Build, packaging, updates, test tooling, storage, supported operating systems | Select when the corresponding foundation work is discussed | Open |
 
 TypeScript describes the source language, not the runtime. Electron provides the desktop shell; the interface still needs web markup, styling, and UI components. Configuration, documentation, and minimal Git hook shell entry points use their appropriate formats.
@@ -62,6 +62,7 @@ Proposed ownership:
 | Module | Owns | Boundary |
 | --- | --- | --- |
 | Authentication | Credential references, authentication lifecycle, access to credential storage | Other modules request authenticated access without reading secrets directly |
+| Connections | The "Connect <provider> account" sign-in workflow | Coordinates provider sign-in connectors (adapters) with Accounts and the runtime-context resolver through their public interfaces |
 | Accounts | Account identities, availability, selection, and switching policy | Provider-specific authentication and quota observations arrive through explicit interfaces |
 | Sessions | Application session identity, conversation history, continuation context, and native session associations | Runtime session IDs are associations, never the global session identity |
 | Execution | Run lifecycle, cancellation, recovery coordination, and execution records | Coordinates accounts, sessions, and runtimes through their public interfaces |
@@ -70,7 +71,9 @@ Proposed ownership:
 | Retrospective | Post-run analysis and environment observations with provenance and validity | Contributes guidance through an explicit optional input; execution works without it |
 | Orchestration | User-defined workflows and stage assignments across models/providers | Calls the same execution services used by a single interactive run |
 
-The first five rows describe the implemented foundational modules. Timeline, retrospective, and orchestration are optional modules maintained and shipped by the product owner, with on/off controls in settings. Third-party installation is not the intended meaning of optional. Specific adapter boundaries may emerge as integrations are validated.
+The first six rows describe the implemented foundational modules. Connections sits above Accounts and Authentication so the dependency graph stays acyclic: Accounts depends on Authentication's credential types, and Connections depends on both.
+
+Connected accounts use the `native_login` credential method: the provider keeps the credential in its own login store scoped to the account's private runtime-context directory (`auth.json` under `CODEX_HOME`, or the macOS Keychain entry keyed to `CLAUDE_CONFIG_DIR`). The app records only the opaque reference, and `NativeLoginCredentialResolver` resolves it to an empty environment because the runtime adapters already point the provider at that directory. Credential material therefore never passes through application code or records. Timeline, retrospective, and orchestration are optional modules maintained and shipped by the product owner, with on/off controls in settings. Third-party installation is not the intended meaning of optional. Specific adapter boundaries may emerge as integrations are validated.
 
 ### Concrete runtime contract
 
@@ -81,8 +84,22 @@ The implemented shared runtime contract uses these operations and values:
 - `RuntimeAdapter.startRun(input)` starts an attempt from application-owned input containing the application session, attempt, workspace, prompt, selected model, permission mode, and optional native continuation reference.
 - `RuntimeAdapter.resumeRun(input)` continues a provider-native attempt when the adapter reports that resume is supported.
 - `RuntimeAdapter.cancelRun(attemptId)` requests interruption and reports whether the provider acknowledged it.
+- `RuntimeAdapter.describePermissionMode(mode)` returns adapter-owned text describing the native controls used for an application permission mode, so clients disclose the mapping without provider-name conditionals.
 - `RuntimeAdapter.capabilities(accountId)` returns explicit support flags for resume, fork, approvals, quota reporting, browser tools, computer use, and other optional behavior.
-- The adapter emits normalized application events such as `message_delta`, `tool_request`, `tool_result`, `approval_request`, `usage`, `completed`, `failed`, and `interrupted`.
+- The adapter emits normalized application events such as `message_delta`, `thinking_delta`, `tool_request`, `tool_result`, `approval_request`, `usage`, `completed`, `failed`, and `interrupted`.
+
+Runtime adapters may also expose a model catalog through the application-owned
+`RuntimeModel` contract. The desktop host composes those entries into one
+`models.list` response by querying every connected account for that provider.
+Catalog entries are deduplicated per provider/runtime/model ID while retaining
+the account IDs that reported each model; a failure for one account is
+returned as a partial discovery failure instead of hiding another account's
+models. Discovery uses the selected workspace path when one is available and
+never starts a model turn. Each model retains its provider and runtime routing
+metadata in the host contract, while the renderer presents only the model
+name, provider grouping, and description in a list-only picker. Selecting a
+model therefore chooses the correct adapter without exposing a Claude/Codex
+runtime switch or a free-form model input.
 
 The Codex adapter translates these operations into app-server initialization, thread, turn, notification, approval, and interruption messages. The Claude adapter translates them into Agent SDK query, session, permission, and streaming operations. Core execution handles the normalized operations and events without checking which provider produced them. A provider-specific feature is exposed as a capability or an explicitly named adapter extension; it is not implemented as a provider-name conditional in core code or the renderer. The concrete implementation and deferred behavior are recorded in [MVP implementation](mvp.md).
 
@@ -117,6 +134,7 @@ This is an illustrative ownership map, not directories to create in advance:
 src/
   composition/             Explicit service and feature assembly
   desktop/
+    host/                  Execution host utility process: composed app, active runs, command dispatch
     main/                  Electron lifecycle, windows, IPC handlers
     preload/               Narrow typed renderer bridge
     renderer/              UI shell and feature-specific presentation
@@ -146,6 +164,8 @@ Within each capability, keep its rules, use cases, interfaces, and tests togethe
 Contract ownership stays with the relevant module except for transport-specific schemas. A generic shared-types directory must not become a second domain model. Workspace packages can enforce larger boundaries later if needed; their introduction is not necessary for every module.
 
 ## Desktop and application separation
+
+The implemented desktop process layout, contracts, and renderer structure are described in [desktop application](desktop.md). The execution host runs in an Electron utility process and owns the composed application and all in-flight runs; Electron main validates renderer requests and relays them; the renderer receives serializable views and events through a two-function preload bridge.
 
 The graphical conversation view and terminal presentation must invoke the same application operations. Account switching, session persistence, and recovery are not UI responsibilities. The user's current direction is a terminal presentation of this harness inside the desktop window, not embedding an independent provider CLI. Rendering and terminal libraries remain undecided.
 

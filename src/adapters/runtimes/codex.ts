@@ -8,6 +8,8 @@ import type {
   RuntimeAdapter,
   RuntimeCapabilities,
   RuntimeEvent,
+  RuntimeModel,
+  RuntimeModelInput,
   RuntimeRunInput,
 } from "../../core/execution/types.js";
 import { JsonRpcProcess, type JsonRpcMessage } from "./json-rpc-process.js";
@@ -15,10 +17,10 @@ import { JsonRpcProcess, type JsonRpcMessage } from "./json-rpc-process.js";
 type CodexProcessFactory = (options: {
   readonly cwd: string;
   readonly environment: NodeJS.ProcessEnv;
-}) => JsonRpcProcess;
+}) => Pick<JsonRpcProcess, "request" | "notify" | "respond" | "respondError" | "nextMessage" | "close">;
 
 interface ActiveCodexRun {
-  readonly process: JsonRpcProcess;
+  readonly process: ReturnType<CodexProcessFactory>;
   readonly threadId: string;
   readonly turnId: string;
 }
@@ -32,6 +34,7 @@ interface ActiveCodexRun {
  */
 export class CodexRuntimeAdapter implements RuntimeAdapter {
   readonly runtimeId = "codex-app-server";
+  readonly providerId = "codex";
   private readonly active = new Map<string, ActiveCodexRun>();
   private readonly createProcess: CodexProcessFactory;
 
@@ -50,6 +53,67 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       JsonRpcProcess.start(command, args, processOptions));
   }
 
+  /**
+   * Read every picker-visible catalog page in the saved account's CODEX_HOME.
+   * This short-lived server never starts a thread or turn. Failure is surfaced
+   * to the host instead of substituting stale, hard-coded model names.
+   */
+  async models(input: RuntimeModelInput): Promise<readonly RuntimeModel[]> {
+    const credential = await this.credentials.resolve(input.account.credential);
+    const context = await this.contexts.resolve(input.account.runtimeContextId);
+    const child = this.createProcess({
+      cwd: input.workspacePath ?? context.directory,
+      environment: { ...process.env, ...context.environment, ...credential.environment, CODEX_HOME: context.directory },
+    });
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("Codex model discovery timed out.")), 15_000);
+    });
+    try {
+      return await Promise.race([this.readModels(child), timeout]);
+    } finally {
+      clearTimeout(timer);
+      await child.close();
+    }
+  }
+
+  private async readModels(child: ReturnType<CodexProcessFactory>): Promise<readonly RuntimeModel[]> {
+    await child.request("initialize", {
+      clientInfo: { name: "thinking-and-code", title: "Thinking and Code", version: "0.1.0" },
+      capabilities: {},
+    });
+    child.notify("initialized", {});
+    const models = new Map<string, RuntimeModel>();
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const response = asRecord(await child.request("model/list", {
+        limit: 100, includeHidden: false, ...(cursor === undefined ? {} : { cursor }),
+      }));
+      if (!Array.isArray(response.data)) throw new Error("Codex returned an invalid model catalog.");
+      for (const value of response.data) {
+        const entry = asRecord(value);
+        if (entry.hidden === true) continue;
+        const id = typeof entry.model === "string" ? entry.model : entry.id;
+        if (typeof id !== "string" || id.trim() === "") continue;
+        const current = models.get(id);
+        models.set(id, {
+          id, providerId: this.providerId,
+          label: typeof entry.displayName === "string" ? entry.displayName : current?.label ?? id,
+          ...(typeof entry.description === "string"
+            ? { description: entry.description }
+            : current?.description === undefined ? {} : { description: current.description }),
+          ...(entry.isDefault === true || current?.isDefault === true ? { isDefault: true } : {}),
+        });
+      }
+      cursor = typeof response.nextCursor === "string" ? response.nextCursor : undefined;
+      // A broken provider returning the same cursor must not spin indefinitely.
+      if (cursor !== undefined && cursors.has(cursor)) throw new Error("Codex repeated a model catalog cursor.");
+      if (cursor !== undefined) cursors.add(cursor);
+    } while (cursor !== undefined);
+    return [...models.values()];
+  }
+
   async capabilities(_account: RuntimeAccountContext): Promise<RuntimeCapabilities> {
     return {
       resume: true,
@@ -59,6 +123,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       browserTools: false,
       computerUse: false,
     };
+  }
+
+  describePermissionMode(mode: PermissionMode): string {
+    const policy = codexPermissionPolicy(mode);
+    return `Sandbox '${policy.sandbox}', approval policy '${policy.approvalPolicy}'.`;
   }
 
   startRun(input: RuntimeRunInput): AsyncIterable<RuntimeEvent> {
@@ -198,7 +267,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   private async *handleServerRequest(
-    process: JsonRpcProcess,
+    process: ReturnType<CodexProcessFactory>,
     message: JsonRpcMessage,
     input: RuntimeRunInput,
   ): AsyncIterable<RuntimeEvent> {
@@ -261,6 +330,9 @@ function mapCodexNotification(
   switch (method) {
     case "item/agentMessage/delta":
       return typeof params.delta === "string" ? [{ type: "message_delta", text: params.delta }] : [];
+    case "item/reasoning/summaryTextDelta":
+    case "item/reasoning/textDelta":
+      return typeof params.delta === "string" ? [{ type: "thinking_delta", text: params.delta }] : [];
     case "item/commandExecution/outputDelta":
     case "item/fileChange/outputDelta":
       return [{ type: "tool_result", output: params.delta ?? params }];
