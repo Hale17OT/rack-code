@@ -191,3 +191,46 @@ test("Codex reports per-model reasoning efforts and forwards the chosen effort o
     if (effort !== undefined) assert.equal(turn.params.effort, effort);
   }
 });
+
+test("Codex reports service tiers as speeds with a standard option and sends serviceTierForTurn", async () => {
+  const requests: { method: string; params: any }[] = [];
+  const adapter = new CodexRuntimeAdapter({ resolve: async () => ({ environment: {} }) },
+    { resolve: async () => ({ directory: "/context" }) }, { createProcess: () => ({
+      request: async (method, params) => {
+        requests.push({ method, params });
+        if (method === "model/list") {
+          return { data: [
+            { model: "gpt-5", displayName: "GPT-5", defaultServiceTier: null, serviceTiers: [
+              { id: "priority", name: "Fast", description: "Priority processing" }, { id: "priority", name: "Duplicate" }, { name: "No id" },
+            ] },
+            { model: "legacy", displayName: "Legacy", additionalSpeedTiers: ["fast"] },
+            { model: "plain", displayName: "Plain", serviceTiers: [] },
+          ] };
+        }
+        return method.startsWith("thread/") ? { thread: { id: "thread" } } : method === "turn/start" ? { turn: { id: "turn" } } : {};
+      }, notify: () => {}, respond: () => {}, respondError: () => {}, close: async () => {},
+      nextMessage: async () => ({ done: false, value: { method: "turn/completed", params: { turn: { status: "completed" } } } }),
+    }) });
+  const account = { accountId: "account", providerId: "codex", credential: { id: "credential", providerId: "codex", method: "native_login" as const }, runtimeContextId: "context" };
+  const models = await adapter.models({ account });
+  // A null default means standard speed, which stays selectable.
+  assert.deepEqual(models[0]?.speeds, [
+    { id: "default", label: "Standard", fast: false, description: "Codex standard speed" },
+    { id: "priority", label: "Fast", fast: true, description: "Priority processing" },
+  ]);
+  assert.equal(models[0]?.defaultSpeed, "default");
+  assert.deepEqual(models[1]?.speeds?.map((speed) => speed.id), ["default", "fast"]);
+  assert.equal(models[2]?.speeds, undefined);
+
+  for (const speed of ["priority", undefined]) {
+    requests.length = 0;
+    for await (const _event of adapter.startRun({ runId: "run", attemptId: "attempt", sessionId: "session", projectPath: "/project", prompt: "test",
+      permissionMode: "ask", account, signal: new AbortController().signal, requestApproval: async () => "allow",
+      ...(speed === undefined ? {} : { speed }) })) { /* Drain. */ }
+    const turn = requests.find((request) => request.method === "turn/start")!;
+    assert.equal("serviceTierForTurn" in turn.params, speed !== undefined);
+    // The per-turn field is used so the thread's own tier is never rewritten.
+    assert.equal("serviceTier" in turn.params, false);
+    if (speed !== undefined) assert.equal(turn.params.serviceTierForTurn, speed);
+  }
+});

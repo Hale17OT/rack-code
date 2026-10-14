@@ -12,6 +12,7 @@
  */
 import {
   empty,
+  array,
   boolean,
   object,
   oneOf,
@@ -19,6 +20,7 @@ import {
   text,
   type Validator,
 } from "./validation.js";
+import { MAX_ATTACHMENTS, type SessionAttachment } from "../../core/sessions/attachments.js";
 import type { ProjectChanges, ProjectRepositories, RepositoryDiscoveryOptions } from "./views.js";
 import {
   PERMISSION_MODES,
@@ -58,6 +60,8 @@ export interface RegisterAccountParams {
 }
 
 export interface StartRunParams {
+  /** IDs of session-owned copies, resolved by the host rather than trusting client paths. */
+  readonly attachmentIds?: readonly string[];
   readonly sessionId: string;
   readonly projectId: string;
   readonly providerId: string;
@@ -68,6 +72,8 @@ export interface StartRunParams {
   readonly model?: string;
   /** A level from the selected model's `reasoningEfforts`; omit for the provider default. */
   readonly reasoningEffort?: string;
+  /** An option from the selected model's `speeds`; omit for the provider default. */
+  readonly speed?: string;
   readonly permissionMode: PermissionMode;
 }
 
@@ -110,6 +116,7 @@ export interface HostCommandMap {
     result: SessionView;
   };
   "sessions.get": { params: { readonly sessionId: string }; result: SessionView };
+  "sessions.attachFiles": { params: { readonly sessionId: string; readonly paths: readonly string[] }; result: readonly SessionAttachment[] };
   "sessions.discover": { params: { readonly projectId: string }; result: SessionDiscovery };
   "sessions.previewImport": {
     params: { readonly projectId: string; readonly sourceId: string; readonly nativeSessionId: string };
@@ -171,6 +178,7 @@ export const COMMAND_VALIDATORS: { readonly [C in HostCommand]: Validator<Comman
   "sessions.list": object({ projectId: optional(id) }),
   "sessions.create": object({ projectId: id, title: optional(text({ maxLength: 256 })) }),
   "sessions.get": object({ sessionId: id }),
+  "sessions.attachFiles": object({ sessionId: id, paths: array(text(), MAX_ATTACHMENTS) }),
   "sessions.discover": object({ projectId: id }),
   "sessions.previewImport": object({ projectId: id, sourceId: id, nativeSessionId: id }),
   "sessions.import": object({ projectId: id, sourceId: id, nativeSessionId: id }),
@@ -178,16 +186,19 @@ export const COMMAND_VALIDATORS: { readonly [C in HostCommand]: Validator<Comman
   "models.list": object({ projectId: optional(id) }),
   "runtimes.capabilities": object({ runtimeId: id, accountId: id }),
   "runs.start": object({
+    attachmentIds: optional(array(id, MAX_ATTACHMENTS)),
     sessionId: id,
     projectId: id,
     providerId: id,
     runtimeId: id,
     accountId: optional(id),
-    prompt: text({ maxLength: 200_000 }),
+    prompt: text({ maxLength: 200_000, allowEmpty: true }),
     model: optional(id),
     // Provider-defined level names (Codex reports free-form strings), so the
     // contract bounds the shape; the adapter checks support for the model.
     reasoningEffort: optional(text({ maxLength: 32 })),
+    // Provider-defined option IDs (Codex service tiers are free-form strings).
+    speed: optional(text({ maxLength: 64 })),
     permissionMode: oneOf(PERMISSION_MODES),
   }),
   "runs.list": object({ sessionId: id }),

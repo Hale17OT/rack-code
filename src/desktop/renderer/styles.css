@@ -1265,6 +1265,94 @@ details.data summary {
   min-width: 0;
 }
 
+/* Attachment actions reuse the app's menu surface. Draft and saved files
+   share compact chips with ellipsis so long names cannot widen the composer. */
+.attachment-trigger {
+  width: 30px;
+  height: 30px;
+  align-self: flex-end;
+  margin-bottom: 3px;
+}
+
+.attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.composer-attachments {
+  padding: 12px 16px 0;
+  max-height: 136px;
+  overflow-y: auto;
+}
+
+.turn-attachments {
+  margin-top: 8px;
+}
+
+.turn-attachments:first-child {
+  margin-top: 0;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.attachment-chip > .icon {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--text-2);
+}
+
+.attachment-name {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-size {
+  flex: none;
+  color: var(--text-3);
+  font-size: 10px;
+}
+
+.attachment-remove {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.attachment-remove .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.attachment-file { cursor: pointer; }
+.attachment-file:hover, .attachment-remove:hover:not(:disabled) { background: var(--overlay); }
+.attachment-remove:disabled { opacity: 0.35; cursor: default; }
+
 .send-button {
   display: inline-grid;
   flex: none;
@@ -2670,8 +2758,7 @@ details.data summary {
 
 /* Import selection is separate from preview navigation and uses native checkboxes. */
 .import-selection { display: flex; align-items: center; justify-content: space-between; padding: 2px 0 10px; border-bottom: 1px solid var(--border); }
-.import-selection label { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
-.import-selection input, .import-session-check input { width: 15px; height: 15px; margin: 0; accent-color: var(--primary); cursor: pointer; }
+.import-select-all { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .import-session-row { display: flex; align-items: flex-start; border: 1px solid transparent; border-radius: 10px; margin-bottom: 5px; }
 .import-session-row.checked { border-color: var(--border-strong); background: var(--overlay); }
 .import-session-check { display: flex; padding: 15px 0 15px 9px; }
@@ -2700,6 +2787,54 @@ details.data summary {
 /* Keep author display rules from exposing panels in a closed disclosure. */
 .activity-card:not([open]) > .activity-body { display: none; }
 
+/* Consecutive tool calls share a quiet disclosure; individual calls retain
+   their own argument/output disclosure inside the expanded group. */
+.tool-group { border: none; }
+.tool-group > summary { display: flex; align-items: center; gap: 8px; padding: 4px 0; list-style: none; cursor: pointer; color: var(--text-2); }
+.tool-group > summary::-webkit-details-marker { display: none; }
+.tool-group > summary:hover { color: var(--text); }
+.tool-group > summary > .icon { width: 15px; height: 15px; }
+.tool-group-title { flex: 1; font-size: 12px; font-weight: 500; color: var(--text); }
+.tool-group-status { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; }
+.tool-group-status .icon { width: 12px; height: 12px; }
+.tool-group.has-failures .tool-group-status { color: var(--danger, #b44a4a); }
+.tool-group[open] > summary .activity-caret { transform: rotate(90deg); }
+.tool-group-body { padding: 2px 0 4px; }
+.tool-group:not([open]) > .tool-group-body { display: none; }
+.tool-group-body > .activity-card { margin: 2px 0; }
+
+/* One compact composer pill opens a two-stage dropdown. The native range
+   retains keyboard/pointer semantics, with the track and stops drawn here. */
+.model-pill-effort { padding-left: 6px; border-left: 1px solid var(--border-strong); color: var(--text-3); font-size: 10px; }
+.model-pill-fast { width: 13px; height: 13px; }
+.model-picker-body { min-height: 0; padding: 4px; }
+.model-choice-list .menu-group { font-size: 9px; padding: 6px 8px 3px; }
+.model-choice { align-items: center; padding: 6px 8px; }
+.model-choice .menu-label { font-size: 12px; }
+.model-choice.selected { background: var(--inset); }
+.model-empty { padding: 18px 0; text-align: center; color: var(--text-2); font-size: 12px; }
+.model-selected { display: flex; align-items: center; gap: 7px; width: 100%; padding: 5px 4px; border: none; background: transparent; text-align: left; cursor: pointer; }
+.model-selected:hover { color: var(--text-2); }
+.model-selected-name { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-selected > .icon { width: 13px; height: 13px; color: var(--text-3); }
+.reasoning-control { padding: 12px 6px 4px; }
+.reasoning-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; font-size: 11px; }
+.reasoning-value { color: var(--text-2); font-size: 11px; }
+.reasoning-slider { appearance: none; display: block; width: 100%; height: 5px; min-height: 0; padding: 0; margin: 10px 0 14px; border: none; border-radius: 10px; cursor: pointer; background: linear-gradient(to right, var(--text) 0 var(--slider-progress), var(--border-strong) var(--slider-progress) 100%); }
+.reasoning-slider::-webkit-slider-thumb { appearance: none; width: 15px; height: 15px; border: 3px solid var(--card); border-radius: 50%; background: var(--text); box-shadow: 0 0 0 1px var(--text); }
+.reasoning-slider:focus { border: none; }
+.reasoning-slider:disabled { cursor: default; opacity: 0.5; }
+.reasoning-ticks { display: flex; align-items: flex-start; justify-content: space-between; gap: 4px; }
+.reasoning-tick { padding: 4px 0; border: none; background: transparent; color: var(--text-3); font-size: 9px; cursor: pointer; overflow-wrap: anywhere; }
+.reasoning-tick.selected { color: var(--text); font-weight: 600; }
+.reasoning-description { min-height: 16px; margin: 10px 0 0; font-size: 11px; line-height: 1.5; color: var(--text-2); }
+.model-settings-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 4px 0; }
+.fast-toggle { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border: 1px solid var(--border-strong); border-radius: 7px; background: transparent; color: var(--text-2); font-size: 11px; cursor: pointer; }
+.fast-toggle > .icon { width: 13px; height: 13px; }
+.fast-toggle-state { padding-left: 5px; border-left: 1px solid currentColor; opacity: 0.7; font-size: 10px; }
+.fast-toggle.enabled { background: var(--text); border-color: var(--text); color: var(--card); }
+.fast-toggle:disabled { opacity: 0.35; cursor: default; }
+
 /* The side diff uses selectable text and horizontal scrolling for long code. */
 .changes-content { padding: 12px; min-width: 0; }
 .run-progress { padding: 12px 0; color: var(--text-2); }
@@ -2720,6 +2855,64 @@ details.data summary {
 .change-patch code { display: block; min-width: max-content; }
 .change-patch code > span { display: block; padding: 0 8px; white-space: pre; }
 .change-file:not([open]) > .change-patch { display: none; }
+
+/* Source-control file lists are flat, with Git status colors and compact
+   group headers. Only the selected file opens a numbered diff below them. */
+.git-changes-content { --git-add: #287c3d; --git-remove: #b33139; --git-modified: #a06b0b; --git-add-bg: rgba(46, 160, 67, 0.12); --git-remove-bg: rgba(248, 81, 73, 0.12); --git-hunk-bg: rgba(56, 139, 253, 0.09); min-width: 0; padding: 4px 0 10px; }
+:root[data-theme="dark"] .git-changes-content { --git-add: #73c991; --git-remove: #f14c4c; --git-modified: #e2c08d; }
+@media (prefers-color-scheme: dark) { :root[data-theme="system"] .git-changes-content { --git-add: #73c991; --git-remove: #f14c4c; --git-modified: #e2c08d; } }
+.git-changes-content > .changes-heading { padding: 0 6px 4px 12px; }
+.git-workspace-name { font-size: 11px; font-weight: 500; color: var(--text-2); }
+.git-repository-picker { padding: 0 8px 6px; }
+.git-repository-picker .dropdown { width: 100%; }
+.git-repository { min-width: 0; padding-bottom: 8px; }
+.git-repository + .git-repository { border-top: 1px solid var(--border); padding-top: 8px; }
+.git-repository-heading { display: flex; align-items: center; gap: 6px; padding: 7px 12px; }
+.git-repository-heading > .icon { width: 13px; height: 13px; color: var(--text-2); }
+.git-repository-name { flex: 1; min-width: 0; font-size: 11px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-branch-name { max-width: 45%; color: var(--text-2); font: 10px var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-change-group > summary { display: flex; align-items: center; gap: 5px; min-height: 27px; padding: 3px 10px; list-style: none; cursor: pointer; font-size: 11px; font-weight: 600; }
+.git-change-group > summary::-webkit-details-marker { display: none; }
+.git-change-group > summary:hover { background: var(--overlay); }
+.git-change-group > summary > span:not(.icon):not(.git-group-count) { flex: 1; }
+.git-change-group > summary .activity-caret { margin: 0; width: 10px; height: 10px; }
+.git-change-group[open] > summary .activity-caret { transform: rotate(90deg); }
+.git-group-count { min-width: 18px; padding: 1px 5px; border-radius: 10px; background: var(--inset); color: var(--text-2); font: 10px var(--font-mono); text-align: center; }
+.git-file-list { max-height: 28vh; overflow-y: auto; }
+.git-change-group:not([open]) > .git-file-list { display: none; }
+.git-file-row { display: flex; align-items: center; gap: 6px; width: 100%; height: 27px; padding: 0 12px 0 23px; border: none; border-radius: 0; background: transparent; text-align: left; cursor: pointer; }
+.git-file-row:hover { background: var(--overlay); }
+.git-file-row.selected { background: var(--inset); }
+.git-file-row > .icon { width: 13px; height: 13px; color: var(--text-2); }
+.git-file-name { flex: 0 1 auto; min-width: 0; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-file-directory { flex: 1; min-width: 0; color: var(--text-3); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-file-status { flex: none; width: 12px; font: 11px var(--font-mono); text-align: center; }
+.status-modified .git-file-status, .status-type_changed .git-file-status, .status-renamed .git-file-status { color: var(--git-modified); }
+.status-added .git-file-status, .status-untracked .git-file-status, .status-copied .git-file-status { color: var(--git-add); }
+.status-deleted .git-file-status, .status-conflicted .git-file-status { color: var(--git-remove); }
+.status-deleted .git-file-name { text-decoration: line-through; color: var(--text-2); }
+.git-empty, .git-preview-note { padding: 6px 12px; margin: 0; color: var(--text-2); font-size: 11px; line-height: 1.6; }
+.git-file-diff { min-width: 0; margin-top: 10px; border-top: 1px solid var(--border-strong); background: var(--canvas); }
+.git-diff-heading { display: flex; align-items: center; gap: 4px; padding: 4px 6px 4px 10px; border-bottom: 1px solid var(--border); }
+.git-diff-filename { flex: 1; min-width: 0; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-diff-source { color: var(--text-3); font-size: 9px; white-space: nowrap; }
+.git-diff-heading .icon-button { width: 23px; height: 23px; }
+.git-diff-heading .icon-button .icon { width: 13px; height: 13px; }
+.git-diff-scroll { max-height: 52vh; overflow: auto; font: 10px/1.8 var(--font-mono); tab-size: 4; }
+.git-diff-line { display: grid; grid-template-columns: 28px 28px 12px minmax(0, 1fr); min-width: max-content; }
+.git-line-number { padding: 0 4px; color: var(--text-3); text-align: right; user-select: none; }
+.git-line-sign { color: var(--text-2); user-select: none; }
+.git-line-text { padding: 0 8px 0 3px; white-space: pre; }
+.git-diff-line.added, .git-split-cell.added { background: var(--git-add-bg); }
+.git-diff-line.removed, .git-split-cell.removed { background: var(--git-remove-bg); }
+.git-diff-line.added .git-line-sign { color: var(--git-add); }
+.git-diff-line.removed .git-line-sign { color: var(--git-remove); }
+.git-diff-hunk { padding: 3px 8px; background: var(--git-hunk-bg); color: var(--text-2); white-space: pre; min-width: max-content; }
+.git-diff-scroll.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); max-height: none; overflow: hidden; }
+.git-split-pane { min-width: 0; max-height: 52vh; overflow: auto; }
+.git-split-pane + .git-split-pane { border-left: 1px solid var(--border-strong); }
+.git-split-cell { display: grid; grid-template-columns: 28px minmax(0, 1fr); min-width: max-content; }
+.git-split-cell.empty { background: var(--inset); }
 .activity-section-label { display: block; color: var(--text-3); font: 10px var(--font-mono); letter-spacing: 0.04em; margin-bottom: 7px; }
 .activity-code, .activity-diff { margin: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--inset); padding: 10px 12px; max-height: 320px; overflow: auto; color: var(--text-2); font: 11px/1.7 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .activity-diff { padding: 8px 0; }
@@ -2744,7 +2937,7 @@ details.data summary {
 }
 
 .repository-controls { display: grid; gap: 8px; margin-bottom: 10px; }
-.repository-controls select { width: 100%; min-width: 0; }
+.repository-controls .dropdown, .changes-content > div > .dropdown { width: 100%; min-width: 0; margin-bottom: 10px; }
 .repository-actions { display: flex; flex-wrap: wrap; gap: 12px; }
 .repository-title { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; margin: 14px 0 8px; }
 .repository-changes + .repository-changes { margin-top: 18px; }
@@ -2975,4 +3168,73 @@ html.resizing * {
   .tree-count.needs-approval {
     animation: none;
   }
+}
+
+/* ------------------------------------------------------------- checkbox */
+
+/* App-drawn checkbox (components/checkbox.ts); no native form control. */
+.checkbox {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--card);
+  color: var(--on-primary);
+  cursor: pointer;
+}
+
+.checkbox[aria-checked="true"],
+.checkbox[aria-checked="mixed"] {
+  border-color: var(--primary);
+  background: var(--primary);
+}
+
+.checkbox .icon {
+  width: 11px;
+  height: 11px;
+}
+
+.checkbox:hover:not(:disabled) {
+  border-color: var(--text-2);
+}
+
+.checkbox:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 2px;
+}
+
+.checkbox:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+/* ------------------------------------------------------- clickable paths */
+
+/* Paths in replies, activity targets, approvals, and the Changes list open
+   the file (or reveal it in Finder when opening could execute it). */
+.md-path,
+.activity-path,
+.approval-path,
+.change-path[role="link"] {
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+
+.md-path:hover,
+.activity-path:hover,
+.approval-path:hover,
+.change-path[role="link"]:hover {
+  color: var(--text);
+  text-decoration-color: currentColor;
+}
+
+.md-path .md-inline-code {
+  text-decoration: inherit;
 }

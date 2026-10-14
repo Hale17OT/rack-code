@@ -71,7 +71,7 @@ export function mountSettings(root: HTMLElement, store: Store, controller: Contr
     if (event.target === overlay) controller.closeSettings();
   });
   overlay.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") controller.closeSettings();
+    if (event.key === "Escape") { event.stopPropagation(); controller.closeSettings(); }
   });
   root.append(overlay);
 

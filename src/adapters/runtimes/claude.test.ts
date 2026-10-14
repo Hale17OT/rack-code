@@ -171,3 +171,45 @@ test("Claude reports supported effort levels and forwards or rejects the chosen 
   assert.equal(events.at(-1)?.type, "failed");
   assert.match(events.at(-1)?.type === "failed" ? (events.at(-1) as { error: string }).error : "", /turbo/);
 });
+
+test("Claude offers standard and fast speeds only for fast-mode models and maps them to the fastMode setting", async () => {
+  const query = {
+    supportedModels: async () => [
+      { value: "opus", displayName: "Opus", description: "Deep", supportsFastMode: true },
+      { value: "haiku", displayName: "Haiku", description: "Fast" },
+    ],
+    close: () => {},
+  } as unknown as Query;
+  const discovery = new ClaudeRuntimeAdapter({ resolve: async () => ({ environment: {} }) },
+    { resolve: async () => ({ directory: "/context" }) }, (() => query) as unknown as typeof import("@anthropic-ai/claude-agent-sdk").query);
+  const account = { accountId: "account", providerId: "claude", credential: { id: "credential", providerId: "claude", method: "native_login" as const }, runtimeContextId: "context" };
+  const models = await discovery.models({ account });
+  assert.deepEqual(models[0]?.speeds?.map((speed) => speed.id), ["standard", "fast"]);
+  assert.deepEqual(models[0]?.speeds?.map((speed) => speed.fast), [false, true]);
+  assert.equal(models[0]?.defaultSpeed, "standard");
+  assert.equal(models[1]?.speeds, undefined);
+
+  let options: import("@anthropic-ai/claude-agent-sdk").Options | undefined;
+  const adapter = new ClaudeRuntimeAdapter({ resolve: async () => ({ environment: {} }) },
+    { resolve: async () => ({ directory: "/context" }) }, ((value: { options: NonNullable<typeof options> }) => {
+      options = value.options;
+      return { async *[Symbol.asyncIterator]() { yield { type: "result", subtype: "success", result: "done" }; }, close: () => {} };
+    }) as unknown as typeof import("@anthropic-ai/claude-agent-sdk").query);
+  const run = async (speed?: string) => {
+    options = undefined;
+    const events = [];
+    for await (const event of adapter.startRun({ runId: "run", attemptId: "attempt", sessionId: "session", projectPath: "/project", prompt: "test",
+      permissionMode: "ask", account, signal: new AbortController().signal, requestApproval: async () => "allow",
+      ...(speed === undefined ? {} : { speed }) })) events.push(event);
+    return events;
+  };
+  await run("fast");
+  assert.deepEqual(options?.settings, { fastMode: true });
+  await run("standard");
+  assert.deepEqual(options?.settings, { fastMode: false });
+  await run();
+  assert.equal(options !== undefined && "settings" in options, false);
+  const events = await run("ludicrous");
+  assert.equal(options, undefined);
+  assert.equal(events.at(-1)?.type, "failed");
+});

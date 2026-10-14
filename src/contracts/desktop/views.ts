@@ -22,7 +22,7 @@ import type {
   RuntimeModel,
 } from "../../core/execution/types.js";
 import type { ProjectRecord } from "../../core/projects/types.js";
-export type { ProjectChanges, ProjectRepositories, RepositoryDiscoveryOptions } from "../../core/projects/types.js";
+export type { ProjectChanges, ProjectChangeFile, ProjectChangeGroup, ProjectChangeStatus, ProjectRepositories, RepositoryDiscoveryOptions } from "../../core/projects/types.js";
 import type { ConnectView } from "../../core/connections/types.js";
 import type { SessionMessage, SessionRecord } from "../../core/sessions/types.js";
 export type { SessionDiscovery, ExternalSessionSnapshot, ImportSessionResult, DiscoveredSession } from "../../core/session-imports/types.js";

@@ -12,6 +12,13 @@
  * code, bold, italic, and links. Anything else renders as plain text, which
  * is the safe fallback for a streaming message that is only partly written.
  *
+ * Bare http(s) URLs are linked, and file paths (in text or as a whole
+ * inline code span) become `path` inlines that the caller can open. Path
+ * detection is deliberately conservative so prose such as "and/or" or a date
+ * stays text: a path must start with `/`, `./`, `../`, or `~/`, or end in a
+ * file extension, and must have at least two segments. A trailing
+ * `:line[:column]` is kept in the text and stripped when opening.
+ *
  * Tables follow the GitHub Flavored Markdown shape: a header row, a
  * delimiter row (`---`, `:--`, `--:`, `:-:`) with the same number of cells,
  * then body rows until a blank line or a line without a pipe. Until the
@@ -24,7 +31,9 @@ export type Inline =
   | { readonly type: "code"; readonly text: string }
   | { readonly type: "strong"; readonly children: readonly Inline[] }
   | { readonly type: "em"; readonly children: readonly Inline[] }
-  | { readonly type: "link"; readonly href: string; readonly children: readonly Inline[] };
+  | { readonly type: "link"; readonly href: string; readonly children: readonly Inline[] }
+  /** A file or folder path; `code` keeps inline-code styling. */
+  | { readonly type: "path"; readonly path: string; readonly code: boolean };
 
 export type Block =
   | { readonly type: "paragraph"; readonly inlines: readonly Inline[] }
@@ -184,6 +193,31 @@ function tableAlignment(line: string | undefined, columns: number): (TableAlign 
   });
 }
 
+/** A path-shaped token: optional prefix, two or more segments, optional :line[:col]. */
+const PATH_TOKEN = /^(?:~\/|\.{1,2}\/|\/)?[\w@+-][\w.@+-]*(?:\/[\w.@+-]+)+(?::\d+(?::\d+)?)?/;
+/** A bare URL; trailing punctuation is trimmed after matching. */
+const URL_TOKEN = /^https?:\/\/[^\s<>"'`]+/;
+
+/** True when `token` is confidently a file path rather than prose. */
+export function isPathLike(token: string): boolean {
+  const match = token.match(PATH_TOKEN);
+  if (match === null || match[0] !== token) return false;
+  const withoutLine = token.replace(/:\d+(?::\d+)?$/, "");
+  const prefixed = /^(?:~\/|\.{1,2}\/|\/)/.test(withoutLine);
+  const lastSegment = withoutLine.split("/").at(-1) ?? "";
+  const hasExtension = /^[^.].*\.[A-Za-z0-9]{1,10}$/.test(lastSegment);
+  return prefixed || hasExtension;
+}
+
+/** Drops sentence punctuation (and an unbalanced closing parenthesis) from a token's end. */
+function trimTrailing(token: string): string {
+  let result = token.replace(/[.,;:!?]+$/, "");
+  while (result.endsWith(")") && (result.match(/\(/g)?.length ?? 0) < (result.match(/\)/g)?.length ?? 0)) {
+    result = result.slice(0, -1).replace(/[.,;:!?]+$/, "");
+  }
+  return result;
+}
+
 /** Parses inline code, links, bold, and italic. Unmatched markers stay literal. */
 export function parseInline(text: string): Inline[] {
   const result: Inline[] = [];
@@ -202,9 +236,34 @@ export function parseInline(text: string): Inline[] {
     const code = rest.match(/^`([^`]+)`/);
     if (code !== null) {
       flush();
-      result.push({ type: "code", text: code[1] as string });
+      const text = code[1] as string;
+      result.push(isPathLike(text.trim()) ? { type: "path", path: text.trim(), code: true } : { type: "code", text });
       index += code[0].length;
       continue;
+    }
+
+    // Bare URLs and paths only start at a token boundary, so a slash inside
+    // a word (or a URL already inside a markdown link) is not split.
+    const atBoundary = buffer === "" || /[\s(\[{"']$/.test(buffer);
+    if (atBoundary) {
+      const url = rest.match(URL_TOKEN);
+      if (url !== null) {
+        const href = trimTrailing(url[0]);
+        flush();
+        result.push({ type: "link", href, children: [{ type: "text", text: href }] });
+        index += href.length;
+        continue;
+      }
+      const candidate = rest.match(PATH_TOKEN);
+      if (candidate !== null) {
+        const path = trimTrailing(candidate[0]);
+        if (isPathLike(path)) {
+          flush();
+          result.push({ type: "path", path, code: false });
+          index += path.length;
+          continue;
+        }
+      }
     }
 
     const link = rest.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/);
@@ -238,22 +297,29 @@ export function parseInline(text: string): Inline[] {
   return result;
 }
 
-export function renderMarkdown(source: string, openLink: (href: string) => void): DocumentFragment {
+/** Callbacks for clickable content; without `openPath`, paths render as plain text. */
+export interface MarkdownActions {
+  readonly openLink: (href: string) => void;
+  readonly openPath?: (path: string) => void;
+}
+
+export function renderMarkdown(source: string, actions: MarkdownActions | ((href: string) => void)): DocumentFragment {
+  const resolved: MarkdownActions = typeof actions === "function" ? { openLink: actions } : actions;
   const fragment = document.createDocumentFragment();
   for (const block of parseMarkdown(source)) {
-    fragment.append(renderBlock(block, openLink));
+    fragment.append(renderBlock(block, resolved));
   }
   return fragment;
 }
 
-function renderBlock(block: Block, openLink: (href: string) => void): HTMLElement {
+function renderBlock(block: Block, actions: MarkdownActions): HTMLElement {
   switch (block.type) {
     case "paragraph":
-      return withInlines(document.createElement("p"), block.inlines, openLink);
+      return withInlines(document.createElement("p"), block.inlines, actions);
     case "heading":
-      return withInlines(document.createElement(`h${block.level + 2}` as "h3"), block.inlines, openLink);
+      return withInlines(document.createElement(`h${block.level + 2}` as "h3"), block.inlines, actions);
     case "quote":
-      return withInlines(document.createElement("blockquote"), block.inlines, openLink);
+      return withInlines(document.createElement("blockquote"), block.inlines, actions);
     case "code": {
       const pre = document.createElement("pre");
       pre.className = "md-code";
@@ -266,7 +332,7 @@ function renderBlock(block: Block, openLink: (href: string) => void): HTMLElemen
     case "list": {
       const list = document.createElement(block.ordered ? "ol" : "ul");
       for (const item of block.items) {
-        list.append(withInlines(document.createElement("li"), item, openLink));
+        list.append(withInlines(document.createElement("li"), item, actions));
       }
       return list;
     }
@@ -278,7 +344,7 @@ function renderBlock(block: Block, openLink: (href: string) => void): HTMLElemen
       const table = document.createElement("table");
       table.className = "md-table";
       const cell = (tag: "th" | "td", inlines: readonly Inline[], column: number) => {
-        const element = withInlines(document.createElement(tag), inlines, openLink);
+        const element = withInlines(document.createElement(tag), inlines, actions);
         const align = block.align[column];
         if (align !== null && align !== undefined) element.className = `align-${align}`;
         return element;
@@ -303,14 +369,14 @@ function renderBlock(block: Block, openLink: (href: string) => void): HTMLElemen
   }
 }
 
-function withInlines<T extends HTMLElement>(element: T, inlines: readonly Inline[], openLink: (href: string) => void): T {
+function withInlines<T extends HTMLElement>(element: T, inlines: readonly Inline[], actions: MarkdownActions): T {
   for (const inline of inlines) {
-    element.append(renderInline(inline, openLink));
+    element.append(renderInline(inline, actions));
   }
   return element;
 }
 
-function renderInline(inline: Inline, openLink: (href: string) => void): Node {
+function renderInline(inline: Inline, actions: MarkdownActions): Node {
   switch (inline.type) {
     case "text":
       return document.createTextNode(inline.text);
@@ -321,18 +387,34 @@ function renderInline(inline: Inline, openLink: (href: string) => void): Node {
       return code;
     }
     case "strong":
-      return withInlines(document.createElement("strong"), inline.children, openLink);
+      return withInlines(document.createElement("strong"), inline.children, actions);
     case "em":
-      return withInlines(document.createElement("em"), inline.children, openLink);
+      return withInlines(document.createElement("em"), inline.children, actions);
     case "link": {
       const anchor = document.createElement("a");
       anchor.href = inline.href;
       anchor.title = inline.href;
       anchor.addEventListener("click", (event) => {
         event.preventDefault();
-        openLink(inline.href);
+        actions.openLink(inline.href);
       });
-      return withInlines(anchor, inline.children, openLink);
+      return withInlines(anchor, inline.children, actions);
+    }
+    case "path": {
+      const label = inline.code ? Object.assign(document.createElement("code"), { className: "md-inline-code", textContent: inline.path }) : document.createTextNode(inline.path);
+      const openPath = actions.openPath;
+      if (openPath === undefined) return label;
+      const anchor = document.createElement("a");
+      anchor.className = "md-path";
+      anchor.href = "#";
+      anchor.title = `Open ${inline.path}`;
+      anchor.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openPath(inline.path);
+      });
+      anchor.append(label);
+      return anchor;
     }
   }
 }

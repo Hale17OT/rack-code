@@ -12,6 +12,7 @@ import { JsonAccountStore } from "../adapters/storage/json-account-store.js";
 import { JsonExecutionStore } from "../adapters/storage/json-execution-store.js";
 import { JsonProjectStore } from "../adapters/storage/json-project-store.js";
 import { JsonSessionStore } from "../adapters/storage/json-session-store.js";
+import { DirectoryAttachmentStore } from "../adapters/storage/directory-attachment-store.js";
 import { CodexLocalSessionSource } from "../adapters/session-imports/codex.js";
 import { ClaudeLocalSessionSource } from "../adapters/session-imports/claude.js";
 import { SessionImportsService } from "../core/session-imports/service.js";
@@ -79,7 +80,9 @@ export function createApplication(options: CreateApplicationOptions = {}): Appli
   // Resolve migration aliases through the owning capability before exposing
   // saved sessions or runs. Both histories then group under one folder row.
   const resolveProjectId = async (id: string): Promise<string> => (await projects.getProject(id)).id;
-  const sessions = new SessionsService(new JsonSessionStore(join(dataDirectory, "sessions.json"), resolveProjectId));
+  const sessions = new SessionsService(new JsonSessionStore(join(dataDirectory, "sessions.json"), resolveProjectId), {
+    attachments: new DirectoryAttachmentStore(join(dataDirectory, "attachments")),
+  });
   const executionStore = new JsonExecutionStore(join(dataDirectory, "execution.json"), resolveProjectId);
   const sessionImports = new SessionImportsService(projects, sessions,
     options.sessionSources ?? [new CodexLocalSessionSource(), new ClaudeLocalSessionSource()]);

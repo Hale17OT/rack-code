@@ -1,5 +1,6 @@
 /** Local history picker: checkbox selection is independent from preview focus. */
 import type { DiscoveredSession, ProjectView } from "../../../contracts/desktop/index.js";
+import { createCheckbox, type Checkbox } from "../components/checkbox.js";
 import { openModal } from "../components/modal.js";
 import type { Controller } from "../controller.js";
 import { h, replace, relativeTime } from "../dom.js";
@@ -11,7 +12,7 @@ export function openSessionImport(project: ProjectView, controller: Controller):
   let sessions: readonly DiscoveredSession[] = [];
   const selected = new Set<string>();
   const failures = new Set<string>();
-  const checkboxes = new Map<string, HTMLInputElement>();
+  const checkboxes = new Map<string, Checkbox>();
   let discoveryVersion = 0;
   let previewVersion = 0;
   let importing = false;
@@ -21,14 +22,14 @@ export function openSessionImport(project: ProjectView, controller: Controller):
   const preview = h("div", { class: "import-preview", aria: { live: "polite" } },
     h("p", { class: "empty" }, "Choose a session to preview its conversation."));
   const status = h("p", { class: "form-note", aria: { live: "polite" } }, "Looking for local sessions…");
-  const selectAll = h("input", { type: "checkbox", aria: { label: "Select all sessions" }, onChange: () => {
+  const selectAll = createCheckbox({ label: "Select all sessions", onToggle: (checked) => {
     selected.clear();
-    if (selectAll.checked) for (const session of pendingImports(sessions)) selected.add(importKey(session));
+    if (checked) for (const session of pendingImports(sessions)) selected.add(importKey(session));
     renderList();
   } });
   const count = h("span", { class: "form-note" }, "0 selected");
   const selection = h("div", { class: "import-selection" },
-    h("label", {}, selectAll, "Select all"), count);
+    h("span", { class: "import-select-all" }, selectAll.element, "Select all"), count);
   const refresh = h("button", { class: "button", type: "button", onClick: () => void discover() }, icon("arrow-clockwise"), "Refresh");
   const submit = h("button", { class: "button button-primary", type: "button", disabled: true,
     onClick: () => void importSelected() }, "Import selected");
@@ -43,9 +44,8 @@ export function openSessionImport(project: ProjectView, controller: Controller):
 
   function renderList(focusKey?: string): void {
     const state = selectionState(sessions, selected);
-    selectAll.checked = state.checked;
-    selectAll.indeterminate = state.indeterminate;
-    selectAll.disabled = loading || importing || state.total === 0;
+    selectAll.set(state.indeterminate ? "mixed" : state.checked);
+    selectAll.setDisabled(loading || importing || state.total === 0);
     count.textContent = `${state.count} selected`;
     submit.disabled = loading || importing || state.count === 0;
     submit.textContent = importing ? "Importing…" : state.count === 0 ? "Import selected" : `Import ${state.count} ${state.count === 1 ? "session" : "sessions"}`;
@@ -53,15 +53,14 @@ export function openSessionImport(project: ProjectView, controller: Controller):
     checkboxes.clear();
     replace(list, ...sessions.map((candidate) => {
       const key = importKey(candidate);
-      const checkbox = h("input", { type: "checkbox", checked: selected.has(key),
-        disabled: importing || candidate.importedSessionId !== undefined,
-        aria: { label: `Select ${candidate.title}` }, onChange: () => {
-          if (checkbox.checked) selected.add(key); else selected.delete(key);
-          renderList(key);
-        } });
+      const checkbox = createCheckbox({ label: `Select ${candidate.title}`, checked: selected.has(key), onToggle: (checked) => {
+        if (checked) selected.add(key); else selected.delete(key);
+        renderList(key);
+      } });
+      checkbox.setDisabled(importing || candidate.importedSessionId !== undefined);
       checkboxes.set(key, checkbox);
       return h("div", { class: `import-session-row${selected.has(key) ? " checked" : ""}` },
-        h("label", { class: "import-session-check", title: candidate.importedSessionId === undefined ? "Select session" : "Already imported" }, checkbox),
+        h("span", { class: "import-session-check", title: candidate.importedSessionId === undefined ? "Select session" : "Already imported" }, checkbox.element),
         h("button", { class: `import-session${previewed !== undefined && importKey(previewed) === key ? " selected" : ""}`,
           type: "button", disabled: importing, aria: { pressed: String(previewed !== undefined && importKey(previewed) === key) },
           onClick: () => void showPreview(candidate) },
@@ -70,7 +69,7 @@ export function openSessionImport(project: ProjectView, controller: Controller):
           failures.has(key) ? h("span", { class: "import-session-error" }, "Could not import. Select to retry.") : null,
         ));
     }));
-    if (focusKey !== undefined) checkboxes.get(focusKey)?.focus();
+    if (focusKey !== undefined) checkboxes.get(focusKey)?.element.focus();
     if (!loading && sessions.length === 0) list.append(h("p", { class: "empty" }, "No sessions found for this folder."));
   }
 

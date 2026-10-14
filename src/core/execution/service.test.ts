@@ -17,6 +17,7 @@ import { InMemoryProjectStore } from "../projects/in-memory-store.js";
 import { ProjectsService } from "../projects/service.js";
 import { InMemorySessionStore } from "../sessions/in-memory-store.js";
 import { SessionsService } from "../sessions/service.js";
+import type { AttachmentStore, SessionAttachment } from "../sessions/attachments.js";
 
 class FakeRuntime implements RuntimeAdapter {
   readonly runtimeId: string = "fake-runtime";
@@ -84,11 +85,11 @@ class NoTerminalRuntime extends FakeRuntime {
   }
 }
 
-function setup() {
+function setup(attachments?: AttachmentStore) {
   const now = () => new Date("2026-10-12T00:00:00.000Z");
   const accounts = new AccountsService(new InMemoryAccountStore(), { now });
   const projects = new ProjectsService(new InMemoryProjectStore(), { now });
-  const sessions = new SessionsService(new InMemorySessionStore(), { now });
+  const sessions = new SessionsService(new InMemorySessionStore(), { now, ...(attachments === undefined ? {} : { attachments }) });
   const executions = new InMemoryExecutionStore();
   const runtimes = new RuntimeRegistry();
   const runtime = new FakeRuntime();
@@ -97,8 +98,8 @@ function setup() {
   return { accounts, projects, sessions, executions, runtime, service };
 }
 
-async function createFixture() {
-  const fixture = setup();
+async function createFixture(attachments?: AttachmentStore) {
+  const fixture = setup(attachments);
   const account = await fixture.accounts.register({
     id: "account-1",
     providerId: "fake",
@@ -117,6 +118,35 @@ async function createFixture() {
   });
   return { ...fixture, account, project, session };
 }
+
+test("attachment-only turns retain descriptors and deliver quoted file paths on start and resume", async () => {
+  const file: SessionAttachment = { id: "file-1", name: "notes\nimage.png", path: "/app/attachments/image.png", size: 32 };
+  const storage: AttachmentStore = {
+    importFile: async () => file, remove: async () => {},
+    get: async (sessionId, id) => {
+      if (sessionId !== "session-1" || id !== file.id) throw new Error("Attachment not found.");
+      return file;
+    },
+  };
+  const fixture = await createFixture(storage);
+  const input = { sessionId: fixture.session.id, projectId: fixture.project.id, providerId: "fake",
+    runtimeId: fixture.runtime.runtimeId, prompt: "", attachmentIds: [file.id], permissionMode: "read_only" as const };
+  const first = await fixture.service.start(input);
+  const completed = await first.completed;
+  assert.equal(completed.prompt, "");
+  assert.deepEqual(completed.attachments, [file]);
+  assert.ok(fixture.runtime.started[0]?.prompt.includes(JSON.stringify(file.path)));
+  assert.ok(fixture.runtime.started[0]?.prompt.includes(JSON.stringify(file.name)));
+  const history = await fixture.sessions.get(fixture.session.id);
+  assert.ok(history.messages[0]?.content.includes(JSON.stringify(file.path)));
+  const second = await fixture.service.start({ ...input, prompt: "Review again" });
+  await second.completed;
+  assert.ok(fixture.runtime.resumed[0]?.prompt.includes(JSON.stringify(file.path)));
+  const count = (await fixture.service.listRuns(fixture.session.id)).length;
+  await assert.rejects(fixture.service.start({ ...input, attachmentIds: ["another-session-file"] }), /Attachment not found/);
+  await assert.rejects(fixture.service.start({ ...input, attachmentIds: [] }), /prompt or attachment/);
+  assert.equal((await fixture.service.listRuns(fixture.session.id)).length, count);
+});
 
 test("executes a run end to end, persists transcript and journal, and releases the project", async () => {
   const fixture = await createFixture();
@@ -195,6 +225,54 @@ test("uses the application continuation when the same session resumes on the run
 
   assert.equal(fixture.runtime.resumed.length, 1);
   assert.equal(fixture.runtime.resumed[0]?.continuation?.nativeSessionId, "fake-native-1");
+});
+
+test("does not resume a native thread from another account's runtime context", async () => {
+  const fixture = await createFixture();
+  await fixture.accounts.register({
+    id: "account-2",
+    providerId: "fake",
+    identity: { providerAccountId: "provider-account-2" },
+    credential: { id: "credential-2", providerId: "fake", method: "test" },
+    runtimeContextId: "runtime-context-2",
+    availability: "available",
+  });
+  const runOn = async (accountId: string) => {
+    const handle = await fixture.service.start({
+      sessionId: fixture.session.id,
+      projectId: fixture.project.id,
+      providerId: "fake",
+      accountId,
+      runtimeId: fixture.runtime.runtimeId,
+      prompt: `run on ${accountId}`,
+      permissionMode: "ask",
+    });
+    const iterator = handle.events[Symbol.asyncIterator]();
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) break;
+      if (next.value.type === "approval_request") {
+        handle.respondToApproval(next.value.request.id, "allow");
+      }
+    }
+    await handle.completed;
+  };
+
+  await runOn("account-1");
+  await runOn("account-2");
+  // Switching to account-2 must start fresh: account-1's thread lives in a
+  // different runtime context and would fail to resume natively.
+  assert.equal(fixture.runtime.started.length, 2);
+  assert.equal(fixture.runtime.resumed.length, 0);
+
+  await runOn("account-1");
+  // Returning to account-1 resumes its own thread, kept alongside account-2's.
+  assert.equal(fixture.runtime.resumed.length, 1);
+  assert.equal(fixture.runtime.resumed[0]?.account.runtimeContextId, "runtime-context-1");
+  assert.deepEqual(
+    (await fixture.sessions.get(fixture.session.id)).continuations.map((continuation) => continuation.runtimeContextId),
+    ["runtime-context-2", "runtime-context-1"],
+  );
 });
 
 test("cancellation interrupts the attempt and releases the project", async () => {
@@ -325,7 +403,7 @@ test("an imported conversation starts fresh with visible context and preserves t
   assert.equal(fixture.runtime.resumed[0]?.prompt, "Again");
 });
 
-test("records the requested reasoning effort and passes it to the runtime", async () => {
+test("records the requested reasoning effort and speed and passes them to the runtime", async () => {
   const fixture = await createFixture();
   const handle = await fixture.service.start({
     sessionId: fixture.session.id,
@@ -335,6 +413,7 @@ test("records the requested reasoning effort and passes it to the runtime", asyn
     prompt: "think hard",
     model: "fake-model",
     reasoningEffort: "xhigh",
+    speed: "fast",
     permissionMode: "full_access",
   });
   for await (const event of handle.events) {
@@ -343,4 +422,6 @@ test("records the requested reasoning effort and passes it to the runtime", asyn
   const run = await handle.completed;
   assert.equal(run.reasoningEffort, "xhigh");
   assert.equal(fixture.runtime.started[0]?.reasoningEffort, "xhigh");
+  assert.equal(run.speed, "fast");
+  assert.equal(fixture.runtime.started[0]?.speed, "fast");
 });

@@ -6,13 +6,15 @@ import { isAbsolute, relative, resolve } from "node:path";
 import type { ProjectChangesReader } from "../../core/projects/ports.js";
 import type { ProjectChanges } from "../../core/projects/types.js";
 import { GitRepositoryDiscovery, repositoryScope } from "./git-repositories.js";
+import { patchFiles, statusFiles } from "./git-status.js";
 
 const execute = promisify(execFile);
 const MAX_DIFF = 1_000_000;
 const MAX_NEW_FILE = 128_000;
 
 /**
- * Reads staged/unstaged changes against HEAD and previews untracked text.
+ * Reads separate index/working-tree changes plus a legacy HEAD comparison,
+ * and previews untracked text. Status records preserve partially staged files.
  * Git runs without a shell, external diff drivers or text conversions. Reads
  * are bounded and never stage, reset or modify files. A snapshot can race an
  * editor; periodic refresh supplies the next current view.
@@ -30,7 +32,7 @@ export class GitProjectChangesReader implements ProjectChangesReader {
   }
 
   async read(path: string): Promise<ProjectChanges> {
-    const git = async (args: string[]): Promise<string> => (await execute("git", ["-C", path, ...args], {
+    const git = async (args: string[]): Promise<string> => (await execute("git", ["-C", path, "-c", "core.quotePath=false", ...args], {
       encoding: "utf8", timeout: 5000, maxBuffer: 2_000_000,
       env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
     })).stdout;
@@ -45,14 +47,31 @@ export class GitProjectChangesReader implements ProjectChangesReader {
       }
       throw error;
     }
-    const flags = ["--no-ext-diff", "--no-textconv", "--no-color"];
+    const flags = ["--no-ext-diff", "--no-textconv", "--no-color", "--relative", "--src-prefix=a/", "--dst-prefix=b/"];
     let hasHead = true;
     try { await git(["rev-parse", "--verify", "HEAD"]); } catch { hasHead = false; }
     let diff = hasHead
       ? await git(["diff", ...flags, "HEAD", "--", "."])
       : await git(["diff", ...flags, "--cached", "--", "."]) + await git(["diff", ...flags, "--", "."]);
+    const [rawStatus, prefix, staged, working, branch] = await Promise.all([
+      git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."]),
+      git(["rev-parse", "--show-prefix"]),
+      git(["diff", ...flags, "--cached", "--", "."]),
+      git(["diff", ...flags, "--", "."]),
+      git(["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => hasHead ? git(["rev-parse", "--short", "HEAD"]) : ""),
+    ]);
+    const entries = statusFiles(rawStatus, prefix.replace(/\n$/, ""));
+    const stagedPatches = patchFiles(staged.slice(0, MAX_DIFF));
+    const workingPatches = patchFiles(working.slice(0, MAX_DIFF));
+    // Combined merge patches have multiple old line-number columns. Compare
+    // unresolved files against stage 2 (ours) for a standard numbered diff.
+    const conflicts = entries.some((entry) => entry.group === "conflicts")
+      ? await git(["diff", ...flags, "--ours", "--", "."]) : "";
+    const conflictPatches = patchFiles(conflicts.slice(0, MAX_DIFF));
+    const newPatches = new Map<string, string>();
+    const notices = new Map<string, string>();
     const untracked = (await git(["ls-files", "--others", "--exclude-standard", "-z", "--", "."])).split("\0").filter(Boolean);
-    let truncated = diff.length > MAX_DIFF || untracked.length > 50;
+    let truncated = diff.length > MAX_DIFF || staged.length > MAX_DIFF || working.length > MAX_DIFF || conflicts.length > MAX_DIFF || untracked.length > 50 || entries.length > 500;
     for (const name of untracked.slice(0, 50)) {
       if (diff.length >= MAX_DIFF) { truncated = true; break; }
       const fullPath = resolve(path, name);
@@ -61,9 +80,9 @@ export class GitProjectChangesReader implements ProjectChangesReader {
       // Do not follow untracked symlinks out of the selected project.
       let info;
       try { info = await lstat(fullPath); } catch { continue; }
-      if (!info.isFile()) continue;
+      if (!info.isFile()) { notices.set(name, "Symbolic link or special file; preview unavailable."); continue; }
       const header = `diff --git ${JSON.stringify(`a/${name}`)} ${JSON.stringify(`b/${name}`)}\nnew file mode 100644\n`;
-      if (info.size > MAX_NEW_FILE) { diff += `${header}File too large to preview\n`; truncated = true; continue; }
+      if (info.size > MAX_NEW_FILE) { diff += `${header}File too large to preview\n`; notices.set(name, "File too large to preview."); truncated = true; continue; }
       let content: Buffer;
       try {
         // Bound the actual read as well as the stat: an active tool may grow
@@ -72,17 +91,33 @@ export class GitProjectChangesReader implements ProjectChangesReader {
         try {
           const buffer = Buffer.alloc(MAX_NEW_FILE + 1);
           const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
-          if (bytesRead > MAX_NEW_FILE) { diff += `${header}File too large to preview\n`; truncated = true; continue; }
+          if (bytesRead > MAX_NEW_FILE) { diff += `${header}File too large to preview\n`; notices.set(name, "File too large to preview."); truncated = true; continue; }
           content = buffer.subarray(0, bytesRead);
         } finally { await file.close(); }
       } catch { continue; }
-      if (content.includes(0)) { diff += `${header}Binary file\n`; continue; }
+      if (content.includes(0)) { diff += `${header}Binary file\n`; notices.set(name, "Binary file; no text preview."); continue; }
       const text = content.toString("utf8");
       const lines = text === "" ? [] : text.replace(/\n$/, "").split("\n");
-      diff += `${header}--- /dev/null\n+++ ${JSON.stringify(`b/${name}`)}\n`;
-      if (lines.length) diff += `@@ -0,0 +1,${lines.length} @@\n${lines.map((line) => `+${line}`).join("\n")}\n`;
-      if (text !== "" && !text.endsWith("\n")) diff += "\\ No newline at end of file\n";
+      let patch = `${header}--- /dev/null\n+++ ${JSON.stringify(`b/${name}`)}\n`;
+      if (lines.length) patch += `@@ -0,0 +1,${lines.length} @@\n${lines.map((line) => `+${line}`).join("\n")}\n`;
+      if (text !== "" && !text.endsWith("\n")) patch += "\\ No newline at end of file\n";
+      newPatches.set(name, patch);
+      diff += patch;
     }
-    return { status: "ready", diff: diff.slice(0, MAX_DIFF), truncated: truncated || diff.length > MAX_DIFF };
+    // Bound returned per-file previews as a whole, while keeping status rows
+    // visible even if a large earlier patch consumed the preview budget.
+    let budget = MAX_DIFF;
+    const files = entries.slice(0, 500).map((entry) => {
+      const patch = (entry.status === "untracked" ? newPatches : entry.group === "staged" ? stagedPatches : entry.group === "conflicts" ? conflictPatches : workingPatches).get(entry.path) ?? "";
+      const preview = patch.slice(0, budget);
+      budget -= preview.length;
+      const notice = notices.get(entry.path) ?? (patch.length > preview.length ? "Diff preview limit reached."
+        : /^(Binary files |Binary file)/m.test(patch) ? "Binary file; no text preview."
+          : entry.group === "conflicts" ? "Unresolved conflict: your branch compared with the working tree."
+            : entry.status === "untracked" && !newPatches.has(entry.path) ? "File preview unavailable." : undefined);
+      if (patch.length > preview.length) truncated = true;
+      return { ...entry, diff: preview, ...(notice === undefined ? {} : { notice }) };
+    });
+    return { status: "ready", diff: diff.slice(0, MAX_DIFF), files, ...(branch.trim() === "" ? {} : { branch: branch.trim() }), truncated: truncated || diff.length > MAX_DIFF };
   }
 }

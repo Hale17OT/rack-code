@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { InvalidSessionError, SessionNotFoundError } from "./errors.js";
 import type { SessionStore } from "./ports.js";
+import { MAX_ATTACHMENTS, type AttachmentStore, type SessionAttachment } from "./attachments.js";
 import type {
   CreateSessionInput,
   SessionImportSnapshot,
@@ -12,6 +13,7 @@ import type {
 } from "./types.js";
 
 export interface SessionsServiceOptions {
+  readonly attachments?: AttachmentStore;
   readonly now?: () => Date;
   readonly createId?: () => string;
 }
@@ -20,6 +22,7 @@ export interface SessionsServiceOptions {
 export class SessionsService {
   private readonly now: () => Date;
   private readonly createId: () => string;
+  private readonly attachments: AttachmentStore | undefined;
 
   constructor(
     private readonly store: SessionStore,
@@ -27,6 +30,7 @@ export class SessionsService {
   ) {
     this.now = options.now ?? (() => new Date());
     this.createId = options.createId ?? randomUUID;
+    this.attachments = options.attachments;
   }
 
   async create(input: CreateSessionInput): Promise<SessionRecord> {
@@ -53,6 +57,30 @@ export class SessionsService {
       throw new SessionNotFoundError(sessionId);
     }
     return session;
+  }
+
+  /** Imports a batch atomically from the caller's perspective, without rewriting session history. */
+  async attachFiles(sessionId: SessionId, paths: readonly string[]): Promise<readonly SessionAttachment[]> {
+    await this.get(sessionId);
+    if (this.attachments === undefined) throw new InvalidSessionError("Attachment storage is unavailable.");
+    if (paths.length === 0 || paths.length > MAX_ATTACHMENTS) throw new InvalidSessionError(`Choose between 1 and ${MAX_ATTACHMENTS} files.`);
+    const imported: SessionAttachment[] = [];
+    try {
+      for (const path of paths) imported.push(await this.attachments.importFile(sessionId, path));
+      return imported;
+    } catch (error) {
+      await Promise.allSettled(imported.map((file) => this.attachments!.remove(sessionId, file.id)));
+      throw error;
+    }
+  }
+
+  /** Validates ownership before execution records a run or acquires a writer. */
+  async resolveAttachments(sessionId: SessionId, ids: readonly string[]): Promise<readonly SessionAttachment[]> {
+    if (ids.length === 0) return [];
+    await this.get(sessionId);
+    if (this.attachments === undefined) throw new InvalidSessionError("Attachment storage is unavailable.");
+    if (ids.length > MAX_ATTACHMENTS || new Set(ids).size !== ids.length) throw new InvalidSessionError("Too many or duplicate attachments.");
+    return Promise.all(ids.map((id) => this.attachments!.get(sessionId, id)));
   }
 
   /** Saves a complete import in one store mutation, without fabricated runs. */
@@ -117,23 +145,37 @@ export class SessionsService {
     continuation: NativeContinuationReference,
   ): Promise<SessionRecord> {
     const session = await this.get(sessionId);
-    const withoutRuntime = session.continuations.filter(
-      (candidate) => candidate.runtimeId !== continuation.runtimeId,
+    // Replace only the association for this runtime and account context, so
+    // switching accounts and back resumes each account's own native thread.
+    // Unscoped legacy entries for the runtime are dropped because their
+    // owning context is unknown.
+    const others = session.continuations.filter(
+      (candidate) => candidate.runtimeId !== continuation.runtimeId
+        || (candidate.runtimeContextId !== undefined
+          && candidate.runtimeContextId !== continuation.runtimeContextId),
     );
     const updated: SessionRecord = {
       ...session,
-      continuations: [...withoutRuntime, { ...continuation }],
+      continuations: [...others, { ...continuation }],
       updatedAt: this.now().toISOString(),
     };
     await this.store.save(updated);
     return updated;
   }
 
+  /**
+   * Returns the native thread this runtime can resume for the given account
+   * context. Resuming a thread from another context fails natively (Codex
+   * reports "no rollout found for thread id"), so no match means the caller
+   * starts a fresh native thread.
+   */
   async continuation(
     sessionId: SessionId,
     runtimeId: string,
+    runtimeContextId: string,
   ): Promise<NativeContinuationReference | undefined> {
     const session = await this.get(sessionId);
-    return session.continuations.find((candidate) => candidate.runtimeId === runtimeId);
+    return session.continuations.find((candidate) =>
+      candidate.runtimeId === runtimeId && candidate.runtimeContextId === runtimeContextId);
   }
 }

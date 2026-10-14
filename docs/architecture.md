@@ -99,9 +99,21 @@ returned as a partial discovery failure instead of hiding another account's
 models. Discovery uses the selected project path when one is available and
 never starts a model turn. Each model retains its provider and runtime routing
 metadata in the host contract, while the renderer presents only the model
-name, provider grouping, and description in a list-only picker. Selecting a
+name and provider grouping in a compact dropdown, with descriptions in tooltips. Selecting a
 model therefore chooses the correct adapter without exposing a Claude/Codex
 runtime switch or a free-form model input.
+
+The unified model dropdown (updated 2026-10-14) has no search field or modal
+backdrop. It opens above the composer and replaces the model list with the
+selected model's discrete reasoning slider and a compact Fast on/off tag.
+`components/model-picker.ts` owns this presentation and per-device effort/Fast
+preferences; `model-settings.ts` validates them against each catalog entry.
+The shared popover repositions when the list transforms into the smaller
+settings panel, keeping both stages anchored to the same composer control.
+The provider-neutral `SpeedOption.fast` flag lets adapters explicitly mark
+standard (`false`) and accelerated (`true`) options. The renderer enables
+Fast only when both mappings exist and sends their original IDs unchanged.
+It never guesses tier semantics from provider IDs or display labels.
 
 Reasoning effort follows the same rule (added 2026-10-14). A `RuntimeModel`
 may report `reasoningEfforts` (provider level IDs with optional
@@ -118,6 +130,17 @@ per-model default) and sets the SDK `effort` option, failing the attempt
 for a level outside the SDK's `EffortLevel` set rather than silently running
 at a different effort.
 
+Speed uses the same shape (added 2026-10-14): `RuntimeModel.speeds`
+(`{ id, label, description }`) and `defaultSpeed`, `speed` on `runs.start`,
+`RunRecord`, and `RuntimeRunInput`. Speed semantics belong to the provider;
+the app only offers reported options and passes the chosen ID back. The
+Codex adapter maps `serviceTiers`/`defaultServiceTier` (falling back to the
+deprecated `additionalSpeedTiers`), adds Codex's documented `"default"`
+standard tier, and sends `serviceTierForTurn` so a turn never rewrites the
+thread's tier. The Claude adapter offers Standard/Fast only for models with
+`supportsFastMode` and sets the SDK flag setting `fastMode`; plan
+eligibility, usage, and cooldown remain Claude's decision.
+
 The Codex adapter translates these operations into app-server initialization, thread, turn, notification, approval, and interruption messages. The Claude adapter translates them into Agent SDK query, session, permission, and streaming operations. Core execution handles the normalized operations and events without checking which provider produced them. A provider-specific feature is exposed as a capability or an explicitly named adapter extension; it is not implemented as a provider-name conditional in core code or the renderer. The concrete implementation and deferred behavior are recorded in [MVP implementation](mvp.md).
 
 The product requires users to bring their own provider subscriptions and requires multiple accounts in the first release. Each saved account therefore has its own provider identity, authentication mode, protected credential reference, runtime configuration context, and availability state. Switching accounts changes which account a new attempt uses; it does not mutate credentials for an active attempt. Concurrent attempts using different accounts must not share credential files, token caches, native session directories, or mutable runtime configuration.
@@ -125,6 +148,18 @@ The product requires users to bring their own provider subscriptions and require
 Subscription authentication has documented technical support for both initial runtimes. The Codex app-server documentation describes ChatGPT-managed login and device-code login. Claude documents subscription OAuth tokens for SDK environments, separate account contexts through `CLAUDE_CONFIG_DIR`, account inspection, and subscription rate-limit events. The Agent SDK is intended to embed Claude Code's agent loop in an application, and the product decision is to proceed with that wrapper model using users' own subscriptions. This does not change the requirement to keep credentials and native session state isolated per account. See [runtime integration notes](runtime-integration-notes.md) for the concrete authentication path and isolation behavior.
 
 ## Dependency direction and composition
+
+Session attachments (added 2026-10-14) follow the same boundaries. Sessions
+owns a provider-neutral `AttachmentStore` port and validates session existence,
+batch limits, and file ownership. Startup supplies `DirectoryAttachmentStore`,
+which keeps byte-preserving copies and manifests under the data directory,
+outside projects. Electron main owns only native multi-file selection;
+`sessions.attachFiles` imports selected paths in the execution host. Execution
+resolves `runs.start.attachmentIds` before creating a run, saves descriptors on
+the run, and includes quoted local file references in the runtime prompt and
+conversation history. Existing runtime tools read those files under the chosen
+permissions; no provider upload types enter core or renderer code. See
+[session file attachments](attachments.md) for limits, draft behavior, and retention.
 
 ```mermaid
 flowchart TD
@@ -182,6 +217,15 @@ Contract ownership stays with the relevant module except for transport-specific 
 
 ## Desktop and application separation
 
+The Changes surface exposes typed file-status records through Projects
+(`ProjectChanges.files` and optional branch), normalized by the Git adapter.
+Separate staged and working-tree records preserve partially staged edits;
+the renderer receives per-file patches rather than interpreting Git's native
+status protocol. `changes-view.ts` renders compact groups and a selected
+numbered diff; workbench polling, repository discovery, and writer ownership
+keep their existing boundaries. The combined patch stays available for older
+clients. Reads do not mutate the index. See [Changes panel](changes-view.md).
+
 The implemented desktop process layout, contracts, and renderer structure are described in [desktop application](desktop.md). The execution host runs in an Electron utility process and owns the composed application and all in-flight runs; Electron main validates renderer requests and relays them; the renderer receives serializable views and events through a two-function preload bridge.
 
 The graphical conversation view and terminal presentation must invoke the same application operations. Account switching, session persistence, and recovery are not UI responsibilities. The user's current direction is a terminal presentation of this harness inside the desktop window, not embedding an independent provider CLI. Rendering and terminal libraries remain undecided.
@@ -234,7 +278,7 @@ Do not silently weaken a mode when switching runtimes. If an adapter cannot enfo
 
 ## Sessions, continuity, and records
 
-Global sessions belong to the application and are grouped within projects. One user-facing conversation can be continued by Codex, Claude, or another supported runtime. This does not merge every independent conversation in a project into one transcript. Preserve structured conversation content, project references, execution outcomes, and continuation context independently from native runtime session IDs. Associate each execution attempt with its runtime, account, model, and any native continuation data.
+Global sessions belong to the application and are grouped within projects. One user-facing conversation can be continued by Codex, Claude, or another supported runtime. This does not merge every independent conversation in a project into one transcript. Preserve structured conversation content, project references, execution outcomes, and continuation context independently from native runtime session IDs. Associate each execution attempt with its runtime, account, model, and any native continuation data. Native continuation associations are scoped to the runtime and the account's runtime context, because native IDs resolve only within the isolated store that created them; a session keeps one association per runtime context.
 
 Proposed identities: a session is the ongoing application conversation; a run is a requested unit of work; an attempt is execution using a particular account and runtime. Native Codex threads and Claude SDK sessions remain associated execution state under the application session. Naming and schema are proposals, not finalized contracts.
 

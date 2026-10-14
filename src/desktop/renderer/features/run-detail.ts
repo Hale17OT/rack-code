@@ -53,6 +53,7 @@ export function renderRunDetails(run: RunView, state: AppState, controller: Cont
         row("Account", accountLabel(account, run.accountId)),
         row("Model", run.model ?? "default"),
         row("Reasoning effort", run.reasoningEffort ?? "default"),
+        row("Speed", run.speed ?? "default"),
         row("Project", project?.path ?? shortId(run.projectId)),
       ),
       h("div", { class: "detail-rows" },

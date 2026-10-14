@@ -22,6 +22,13 @@ export const IPC_CHANNELS = {
    * operation handled by main, not an application command for the host.
    */
   selectDirectory: "harness:select-directory",
+  /** Main shows a native multi-file picker; the host imports chosen files separately. */
+  selectFiles: "harness:select-files",
+  /**
+   * Renderer to main: open (or reveal) a file or folder the user clicked.
+   * A desktop-shell operation handled by main, not an application command.
+   */
+  openPath: "harness:open-path",
 } as const;
 
 export type CommandResponse<T = unknown> =
@@ -56,7 +63,23 @@ export interface HarnessBridge {
    * with the chosen absolute path, or `undefined` when the user cancels.
    */
   selectDirectory(options?: SelectDirectoryOptions): Promise<string | undefined>;
+  selectFiles(kind: AttachmentKind): Promise<readonly string[]>;
+  /**
+   * Opens a clicked path with its default application, or reveals it in the
+   * file manager when opening could execute it. Main resolves and checks it.
+   */
+  openPath(request: OpenPathRequest): Promise<OpenPathResult>;
 }
+
+export interface OpenPathRequest {
+  /** Path as written in the UI: absolute, `~/`, or relative, optionally with `:line[:column]`. */
+  readonly path: string;
+  /** Absolute folder that relative paths resolve against (the project folder). */
+  readonly base?: string;
+}
+
+/** What main did with the path. Only these outcomes cross back to the renderer. */
+export type OpenPathResult = "opened" | "revealed" | "missing" | "invalid";
 
 export interface SelectDirectoryOptions {
   /** Dialog title, for example "Choose project folder". */
@@ -64,3 +87,7 @@ export interface SelectDirectoryOptions {
   /** Folder the dialog starts in. */
   readonly defaultPath?: string;
 }
+
+/** These categories only filter the picker; all files use the same import path. */
+export const ATTACHMENT_KINDS = ["images", "documents", "code", "all"] as const;
+export type AttachmentKind = typeof ATTACHMENT_KINDS[number];

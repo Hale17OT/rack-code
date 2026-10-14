@@ -17,16 +17,17 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from "electron";
 
 import {
   isHostCommand,
   validateCommandParams,
 } from "../../contracts/desktop/commands.js";
 import type { HostEvent } from "../../contracts/desktop/events.js";
-import { IPC_CHANNELS, type CommandResponse } from "../../contracts/desktop/transport.js";
-import { ContractValidationError, object, optional, text } from "../../contracts/desktop/validation.js";
+import { ATTACHMENT_KINDS, IPC_CHANNELS, type AttachmentKind, type CommandResponse, type OpenPathResult } from "../../contracts/desktop/transport.js";
+import { ContractValidationError, object, oneOf, optional, text } from "../../contracts/desktop/validation.js";
 import { HostProcess } from "./host-process.js";
+import { classifyOpenPath } from "./open-path.js";
 import { createMainWindow } from "./window.js";
 
 /** How long quitting waits for cancelled runs to record a terminal state. */
@@ -119,6 +120,61 @@ async function handleSelectDirectory(event: IpcMainInvokeEvent, options: unknown
   return result.canceled ? undefined : result.filePaths[0];
 }
 
+const validateOpenPath = object({
+  path: text({ maxLength: 4096 }),
+  base: optional(text({ maxLength: 4096 })),
+});
+
+const FILE_FILTERS: Record<AttachmentKind, Electron.FileFilter> = {
+  images: { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tif", "tiff", "heic", "avif"] },
+  documents: { name: "Documents", extensions: ["pdf", "doc", "docx", "odt", "rtf", "txt", "md", "csv", "xls", "xlsx", "ppt", "pptx"] },
+  code: { name: "Code and text", extensions: ["txt", "md", "json", "jsonl", "csv", "yaml", "yml", "toml", "xml", "log", "js", "jsx", "ts", "tsx", "py", "rb", "go", "rs", "java", "c", "h", "cpp", "cs", "swift", "kt", "html", "css", "sql", "sh", "ipynb"] },
+  all: { name: "All files", extensions: ["*"] },
+};
+
+/** Selects regular files without exposing filesystem APIs or accepting arbitrary dialog options. */
+async function handleSelectFiles(event: IpcMainInvokeEvent, kind: unknown): Promise<readonly string[]> {
+  if (!isTrustedSender(event)) return [];
+  const parsed = oneOf(ATTACHMENT_KINDS)(kind, "kind");
+  const options: Electron.OpenDialogOptions = {
+    title: "Attach files", buttonLabel: "Attach", properties: ["openFile", "multiSelections"],
+    filters: parsed === "all" ? [FILE_FILTERS.all] : [FILE_FILTERS[parsed], FILE_FILTERS.all],
+  };
+  const parent = BrowserWindow.fromWebContents(event.sender);
+  const result = parent === null ? await dialog.showOpenDialog(options) : await dialog.showOpenDialog(parent, options);
+  return result.canceled ? [] : result.filePaths;
+}
+
+/**
+ * Opens a path the user clicked (in a reply, tool activity, or diff).
+ * Paths are untrusted text from agent output: `classifyOpenPath` resolves
+ * them against the project folder and reveals anything that could execute
+ * in Finder instead of opening it. Only the outcome crosses back.
+ */
+async function handleOpenPath(event: IpcMainInvokeEvent, request: unknown): Promise<OpenPathResult> {
+  if (!isTrustedSender(event)) return "invalid";
+  let parsed: ReturnType<typeof validateOpenPath>;
+  try {
+    parsed = validateOpenPath(request, "");
+  } catch {
+    return "invalid";
+  }
+  const action = await classifyOpenPath(parsed.path, parsed.base);
+  if (action === undefined) return "invalid";
+  if (action.kind === "missing") return "missing";
+  if (action.kind === "reveal") {
+    shell.showItemInFolder(action.path);
+    return "revealed";
+  }
+  // openPath resolves with an error message, or "" on success.
+  const failure = await shell.openPath(action.path);
+  if (failure !== "") {
+    shell.showItemInFolder(action.path);
+    return "revealed";
+  }
+  return "opened";
+}
+
 /**
  * Confirms quitting when runs are active, then stops them through the host.
  * Returns false when the user chose to keep working.
@@ -173,6 +229,8 @@ app.on("activate", () => {
 void app.whenReady().then(() => {
   ipcMain.handle(IPC_CHANNELS.invoke, handleInvoke);
   ipcMain.handle(IPC_CHANNELS.selectDirectory, handleSelectDirectory);
+  ipcMain.handle(IPC_CHANNELS.selectFiles, handleSelectFiles);
+  ipcMain.handle(IPC_CHANNELS.openPath, handleOpenPath);
   // THINKING_AND_CODE_DATA_DIR isolates development or test data from the
   // default `~/.thinking-and-code` directory used by the host.
   const dataDirectory = process.env["THINKING_AND_CODE_DATA_DIR"];

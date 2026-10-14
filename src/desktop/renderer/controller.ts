@@ -21,11 +21,13 @@ import {
   type RunView,
   type SessionDiscovery,
   type ExternalSessionSnapshot,
+  type AttachmentKind,
 } from "../../contracts/desktop/index.js";
 import type { HostClient } from "./host-client.js";
 import { loadEnabledPlugins, saveEnabledPlugins } from "./surfaces.js";
 import type { AppState, LiveRun, Notice, SettingsSection, Store } from "./store.js";
 import { eventsFromJournal } from "./transcript.js";
+import { MAX_ATTACHMENTS, type SessionAttachment } from "../../core/sessions/attachments.js";
 
 export class Controller {
   private ready = false;
@@ -304,9 +306,26 @@ export class Controller {
     });
   }
 
-  /** Opens an https sign-in page in the default browser (main enforces https). */
+  /** Opens an http(s) link in the default browser (main refuses other schemes). */
   openExternal(url: string): void {
-    if (url.startsWith("https://")) window.open(url, "_blank", "noopener");
+    if (url.startsWith("https://") || url.startsWith("http://")) window.open(url, "_blank", "noopener");
+  }
+
+  /**
+   * Opens a path the user clicked. Relative paths resolve against `base`,
+   * defaulting to the selected session's project folder. A path that no
+   * longer exists is reported as a notice rather than failing silently.
+   */
+  async openPath(path: string, base?: string): Promise<void> {
+    const state = this.store.get();
+    const projectPath = base ?? state.projects.find((project) => project.id === (state.session?.projectId ?? state.selection.projectId))?.path;
+    try {
+      const result = await this.host.openPath({ path, ...(projectPath === undefined ? {} : { base: projectPath }) });
+      if (result === "missing") this.notify({ kind: "info", message: `${path} was not found.` });
+      else if (result === "invalid") this.notify({ kind: "info", message: `${path} cannot be opened.` });
+    } catch (error) {
+      this.report(error);
+    }
   }
 
   private applyConnect(connect: ConnectView): void {
@@ -339,6 +358,19 @@ export class Controller {
 
   // ---------------------------------------------------------------------------
   // Runs
+
+  /** Captures the destination session before opening the dialog, so switching sessions cannot reroute files. */
+  async attachFiles(sessionId: string, kind: AttachmentKind, remaining: number): Promise<readonly SessionAttachment[]> {
+    try {
+      const paths = await this.host.selectFiles(kind);
+      if (paths.length === 0) return [];
+      if (paths.length > remaining) throw new Error(`You can attach up to ${MAX_ATTACHMENTS} files per message. ${remaining} slots remain.`);
+      return await this.host.call("sessions.attachFiles", { sessionId, paths });
+    } catch (error) {
+      this.report(error);
+      return [];
+    }
+  }
 
   async startRun(params: StartRunParams): Promise<boolean> {
     return this.attempt(async () => {

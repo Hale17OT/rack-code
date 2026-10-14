@@ -5,6 +5,7 @@ import type { AccountRecord } from "../accounts/types.js";
 import type { ProjectsService } from "../projects/service.js";
 import type { SessionsService } from "../sessions/service.js";
 import { InvalidSessionError } from "../sessions/errors.js";
+import { promptWithAttachments } from "../sessions/attachments.js";
 import { AccountProviderMismatchError } from "../accounts/errors.js";
 import {
   ApprovalNotFoundError,
@@ -27,6 +28,7 @@ import type {
 } from "./types.js";
 
 export interface StartRunInput {
+  readonly attachmentIds?: readonly string[];
   readonly sessionId: string;
   readonly projectId: string;
   readonly providerId: string;
@@ -36,6 +38,8 @@ export interface StartRunInput {
   readonly model?: string;
   /** Reasoning effort from the model catalog; omit for the provider default. */
   readonly reasoningEffort?: string;
+  /** Speed option from the model catalog; omit for the provider default. */
+  readonly speed?: string;
   readonly permissionMode: PermissionMode;
 }
 
@@ -86,6 +90,8 @@ export class ExecutionService {
       throw new InvalidSessionError("The run's project must match its session's project.");
     }
     input = { ...input, projectId: project.id };
+    const attachments = await this.sessions.resolveAttachments(input.sessionId, input.attachmentIds ?? []);
+    if (input.prompt.trim() === "" && attachments.length === 0) throw new InvalidSessionError("A prompt or attachment is required.");
     const account = await this.resolveAccount(input);
     const runtime = this.runtimes.get(input.runtimeId);
     const runId = this.createId();
@@ -96,10 +102,12 @@ export class ExecutionService {
       sessionId: input.sessionId,
       projectId: input.projectId,
       prompt: input.prompt,
+      ...(attachments.length === 0 ? {} : { attachments }),
       providerId: input.providerId,
       accountId: account.id,
       ...(input.model === undefined ? {} : { model: input.model }),
       ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
+      ...(input.speed === undefined ? {} : { speed: input.speed }),
       permissionMode: input.permissionMode,
       status: "queued",
       attemptIds: [attemptId],
@@ -259,6 +267,7 @@ export class ExecutionService {
     let terminalError: string | undefined;
 
     try {
+      const attachedPrompt = promptWithAttachments(input.prompt, run.attachments ?? []);
       await this.projects.acquireWriter(input.projectId, attempt.id);
       currentRun = await this.updateRun(currentRun, "running");
       currentAttempt = await this.updateAttempt(currentAttempt, "running");
@@ -266,7 +275,7 @@ export class ExecutionService {
       onAttempt(currentAttempt);
       await this.sessions.appendMessage(input.sessionId, {
         role: "user",
-        content: input.prompt,
+        content: attachedPrompt,
         metadata: { runId: currentRun.id, attemptId: currentAttempt.id },
       });
       await this.accounts.markUsed(account.id);
@@ -282,9 +291,10 @@ export class ExecutionService {
           runtimeContextId: account.runtimeContextId,
         },
         projectPath,
-        prompt: input.prompt,
+        prompt: attachedPrompt,
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
+        ...(input.speed === undefined ? {} : { speed: input.speed }),
         permissionMode: input.permissionMode,
         signal: controller.signal,
         requestApproval: async (request) => {
@@ -294,7 +304,14 @@ export class ExecutionService {
           return approvals.request(request);
         },
       };
-      const continuation = await this.sessions.continuation(input.sessionId, runtime.runtimeId);
+      // Scope the lookup to the selected account's runtime context: a manual
+      // account switch or an automatic fallback must not resume a native
+      // thread that only exists in another account's store.
+      const continuation = await this.sessions.continuation(
+        input.sessionId,
+        runtime.runtimeId,
+        account.runtimeContextId,
+      );
       // An external snapshot has no resumable state in Rack's isolated account
       // context. Give a fresh native thread the recent visible conversation,
       // quoted as historical context; do not replay tool calls or copy secrets.
@@ -303,7 +320,7 @@ export class ExecutionService {
         if (session.importSource !== undefined) {
           const context = importedConversationContext(session.messages.filter((message) =>
             message.metadata?.["runId"] !== currentRun.id));
-          runtimeInput = { ...runtimeInput, prompt: `${context}\n\nCurrent request:\n${input.prompt}` };
+          runtimeInput = { ...runtimeInput, prompt: `${context}\n\nCurrent request:\n${attachedPrompt}` };
         }
       }
       const stream = continuation === undefined
@@ -328,6 +345,7 @@ export class ExecutionService {
           onAttempt(currentAttempt);
           await this.sessions.associateContinuation(input.sessionId, {
             runtimeId: runtime.runtimeId,
+            runtimeContextId: account.runtimeContextId,
             nativeSessionId: event.nativeSessionId,
           });
         } else if (event.type === "availability") {

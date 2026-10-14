@@ -12,6 +12,9 @@ import {
   type HostCommand,
   type HostEvent,
   type SelectDirectoryOptions,
+  type OpenPathRequest,
+  type OpenPathResult,
+  type AttachmentKind,
 } from "../../contracts/desktop/index.js";
 
 declare global {
@@ -25,6 +28,9 @@ export interface HostClient {
   onEvent(listener: (event: HostEvent) => void): () => void;
   /** Native folder picker; `undefined` when cancelled. */
   selectDirectory(options?: SelectDirectoryOptions): Promise<string | undefined>;
+  selectFiles(kind: AttachmentKind): Promise<readonly string[]>;
+  /** Opens or reveals a clicked path through Electron main. */
+  openPath(request: OpenPathRequest): Promise<OpenPathResult>;
 }
 
 export function createHostClient(bridge: HarnessBridge = window.harness): HostClient {
@@ -38,5 +44,7 @@ export function createHostClient(bridge: HarnessBridge = window.harness): HostCl
     },
     onEvent: (listener) => bridge.onEvent(listener),
     selectDirectory: (options) => bridge.selectDirectory(options),
+    selectFiles: (kind) => bridge.selectFiles(kind),
+    openPath: (request) => bridge.openPath(request),
   };
 }

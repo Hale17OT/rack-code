@@ -42,6 +42,17 @@ The host returns an `ExecutionHandle` with `events`, `completed`, `respondToAppr
 
 ## Streaming transcript and tools
 
+Consecutive tool calls and unpaired tool outputs form one borderless collapsed disclosure with a call count and aggregate status. Text, thinking, and status items break groups. Expanding a group exposes the existing per-call disclosures; a single call keeps its individual row. Group and nested-call expansion choices survive streaming redraws. Imported and saved activity follows the same grouping rules.
+
+The composer clipboard icon opens an upward action menu for Images, Documents,
+Code and text, and Any file. A native picker allows multiple files; removable
+filename/size chips appear above the prompt. Allow attachment-only messages,
+disable sending during import, and retain selections when starting a run fails.
+Draft files belong to their originating session even when selection finishes
+after navigation. Sent attachments appear as clickable chips in the user bubble
+and persist after reload. Limits and runtime reading behavior are documented in
+[session file attachments](attachments.md).
+
 Render `message_delta` events as incremental assistant text, coalescing adjacent deltas for display while preserving journal order for recovery. Render readable `thinking_delta` text as a separate prose trace, open by default, with an optional collapse control. Distinguish exposed trace text from reasoning summaries using event metadata. Render `native_session` as a non-user-visible association in run details. Render `tool_request` as an activity card with a meaningful title and command/file target. Correlate tool calls/results by `toolCallId`; ID-less legacy results use positional pairing only with ID-less requests. Append `tool_output_delta` text without marking completion, and replace it with the authoritative `tool_result`. Show status, exit code, duration, readable output and styled file diffs when supplied. Unknown tool shapes must be shown as expandable structured data rather than discarded.
 
 Usage events may contain input tokens, output tokens, and estimated cost. Show missing fields as unavailable, never as zero. Availability events update the account card and the run detail without changing the active attempt's account.
@@ -54,6 +65,12 @@ An `approval_request` pauses the runtime until the user responds. Render the req
 
 ## Cancellation and interruption
 
+Escape cancels the queued/running turn in the currently selected session,
+using the same cancellation operation as Stop, without clearing the draft.
+An open menu or modal consumes Escape first; Settings also closes without
+cancelling a run. Repeated key events and a run already stopping send no
+additional cancellation requests. Background sessions are unaffected.
+
 The cancel action is available while queued or running and is idempotent from the UI's perspective. Disable duplicate submissions after the first request, continue consuming events until the terminal `interrupted` state, and then refresh the project lock. A renderer disconnect is not cancellation; the host owns the run and retains pending approvals for a future client.
 
 ## Error and recovery states
@@ -64,7 +81,7 @@ For `failed`, show the provider error and whether the adapter marked it retryabl
 
 ## Runtime and capability disclosure
 
-The model picker calls `models.list` and groups model entries from all connected accounts by provider. The selected entry supplies the hidden `providerId` and `runtimeId` for `runs.start`; there is no runtime picker or model text field. When the selected entry reports `reasoningEfforts`, a reasoning effort picker offers exactly those levels and sends the chosen `reasoningEffort` with `runs.start`; omitting it uses the provider default. Hide the picker for models without levels, and never offer a level the catalog did not report. Capability flags returned by `runtime.capabilities` still control permission options for the selected model's adapter: resume, fork, approvals, quota reporting, browser tools, and computer use. Disable or explain controls whose capability is false. Do not infer capability from provider names in the renderer.
+The model-settings pill opens a minimal dropdown anchored above the composer. Its first stage shows the cached `models.list` catalog grouped by provider, with model names only, no search field or backdrop, and descriptions in tooltips. Choosing a model transforms the list into that model's discrete reasoning slider and a compact Fast on/off switch. The back arrow returns to the list; the checkmark or an outside click closes the dropdown. The chosen entry supplies hidden `providerId`/`runtimeId` routing for `runs.start`; only reported model IDs can be selected. The slider offers only reported reasoning levels, with a Default stop when the provider reports no valid default. Hide it when reasoning is not configurable. Fast uses adapter-provided `SpeedOption.fast` flags to identify on/off options and is disabled without both. Send the chosen `reasoningEffort` and original `speed` ID, revalidating saved preferences when models change. These choices apply to the next turn. Capability flags returned by `runtimes.capabilities` still control the selected model's available permission modes; never infer capabilities or speed semantics from provider names.
 
 Permission mapping must be shown in the run details because the same app mode maps to different native controls. Claude `read_only` uses plan mode; Codex uses a read-only sandbox. Claude and Codex full access both bypass their native approval checks within the host's available permissions.
 
@@ -89,3 +106,7 @@ The response footer contains only the date and time. Copy, account/model/permiss
 ### Active-run footer (2026-10-14)
 
 Do not show the response timestamp until the run leaves queued/running state. Show a persistent animated three-dot indicator throughout active work, including waiting for approval or cancellation. Honor reduced-motion preferences. The permission picker displays the active run’s actual mode and is disabled until it finishes; permission changes apply to the next run.
+
+## Git Changes browser (updated 2026-10-14)
+
+The right Changes surface follows a compact Source Control file-list layout. Group normalized host file records into Staged Changes, Changes, and Merge Changes, with counts and status-letter decorations. A partially staged file appears once in each applicable section; clicking a row selects that section's comparison. Render one selected diff with old/new line numbers and colored additions/deletions, offering inline or split view. Split panes keep both versions visible and synchronize vertical scrolling. Keep current selection, expansion and scroll position through polling, and discard stale project/repository replies. Show binary/large-preview notices rather than treating absent text as a clean repository. Discovery actions belong in an options menu. File opening remains a separate safe desktop operation, disabled for deleted files. See [Changes panel](changes-view.md).

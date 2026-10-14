@@ -14,8 +14,10 @@
  * while open, the panel returns to the launcher.
  */
 import type { ProjectChanges, ProjectRepositories, RepositoryDiscoveryOptions } from "../../../contracts/desktop/index.js";
+import { createDropdown } from "../components/dropdown.js";
 import type { Controller } from "../controller.js";
-import { diffFiles } from "./change-diff.js";
+import { renderRepositoryChanges, type ChangesMemory } from "./changes-view.js";
+import { openPopover } from "../components/popover.js";
 import { renderRunDetails } from "./run-detail.js";
 import { h, replace } from "../dom.js";
 import { icon } from "../icons.js";
@@ -33,7 +35,19 @@ export function mountWorkbench(root: HTMLElement, store: Store, isVisible: () =>
   const snapshots = new Map<string, { snapshot?: ProjectChanges; error?: string }>();
   let error: string | undefined;
   let inFlight = false;
-  const collapsed = new Set<string>();
+  const changesMemory: ChangesMemory = { selectedFiles: new Map(), collapsedGroups: new Set(), split: false };
+  // The body is rebuilt on every render, so pickers are created once and
+  // re-attached with fresh options; rebuilding them would close an open menu
+  // whenever a streaming run re-renders the panel. App dropdowns replace
+  // native <select> elements here, as everywhere in the renderer.
+  const runPicker = createDropdown<string>({
+    ariaLabel: "Run details for", menuWidth: 300,
+    onChange: (runId) => { if (runId !== store.get().selection.runId) void controller.selectRun(runId); },
+  });
+  const repositoryPicker = createDropdown<string>({
+    ariaLabel: "Repository", variant: "pill", menuWidth: 260,
+    onChange: (value) => chooseRepository(value === ALL_REPOSITORIES ? "" : value),
+  });
   const body = h("div", { class: "workbench-body" });
   root.append(body);
 
@@ -53,6 +67,16 @@ export function mountWorkbench(root: HTMLElement, store: Store, isVisible: () =>
   };
 
   function render(): void {
+    const focused = root.contains(document.activeElement) ? document.activeElement as HTMLElement : undefined;
+    const focusPath = focused?.dataset["changePath"];
+    const focusGroup = focused?.dataset["changeGroup"];
+    const focusLabel = focused?.getAttribute("aria-label");
+    const focusRepository = focused?.closest<HTMLElement>(".git-repository")?.dataset["repositoryKey"];
+    const scroll = body.scrollTop;
+    const diffScroll = [...body.querySelectorAll<HTMLElement>(".git-diff-scroll:not(.split), .git-split-pane")].map((node) => ({
+      repository: node.closest<HTMLElement>(".git-repository")?.dataset["repositoryKey"], top: node.scrollTop, left: node.scrollLeft,
+      path: node.closest<HTMLElement>(".git-file-diff")?.dataset["diffPath"], side: node.dataset["diffSide"],
+    }));
     const surfaces = available();
     const surface = surfaces.find((candidate) => candidate.id === openSurface);
     if (surface === undefined) {
@@ -62,6 +86,19 @@ export function mountWorkbench(root: HTMLElement, store: Store, isVisible: () =>
       replace(body, renderSurface(surface, () => open(undefined), surface.id === "changes" ? renderChanges()
         : surface.id === "run-details" ? renderDetails() : undefined));
     }
+    body.scrollTop = scroll;
+    for (const node of body.querySelectorAll<HTMLElement>(".git-diff-scroll:not(.split), .git-split-pane")) {
+      const matches = diffScroll.filter((entry) => entry.repository === node.closest<HTMLElement>(".git-repository")?.dataset["repositoryKey"]
+        && entry.path === node.closest<HTMLElement>(".git-file-diff")?.dataset["diffPath"]);
+      const position = matches.find((entry) => entry.side === node.dataset["diffSide"]) ?? matches[0];
+      if (position !== undefined) { node.scrollTop = position.top; node.scrollLeft = position.left; }
+    }
+    // A status poll or file selection rebuilds this surface. Keep keyboard
+    // navigation on the same file/action without injecting paths into selectors.
+    if (focused !== undefined) [...body.querySelectorAll<HTMLElement>("button")].find((node) =>
+      node.closest<HTMLElement>(".git-repository")?.dataset["repositoryKey"] === focusRepository &&
+      (focusPath !== undefined ? node.dataset["changePath"] === focusPath && node.dataset["changeGroup"] === focusGroup
+        : focusLabel !== null && focusLabel !== undefined && node.getAttribute("aria-label") === focusLabel))?.focus({ preventScroll: true });
   }
 
   function sessionRuns() {
@@ -82,8 +119,12 @@ export function mountWorkbench(root: HTMLElement, store: Store, isVisible: () =>
   function renderDetails(): HTMLElement {
     const run = selectedRun();
     return h("div", { class: "changes-content" }, run === undefined ? h("p", { class: "note" }, "No runs in this session yet.")
-      : h("div", {}, h("select", { aria: { label: "Run details for" }, onChange: (event) => void controller.selectRun((event.target as HTMLSelectElement).value) },
-        ...sessionRuns().map((candidate) => h("option", { value: candidate.id, selected: run.id === candidate.id }, `${candidate.prompt.slice(0, 60)} · ${candidate.status}`))),
+      : h("div", {}, (() => {
+        runPicker.setOptions(sessionRuns().map((candidate) => ({
+          value: candidate.id, label: candidate.prompt.slice(0, 60) || "Run", description: candidate.status,
+        })), run.id);
+        return runPicker.element;
+      })(),
         renderRunDetails(run, store.get(), controller)));
   }
 
@@ -96,7 +137,8 @@ export function mountWorkbench(root: HTMLElement, store: Store, isVisible: () =>
     repository = value;
     generation++;
     snapshots.clear();
-    collapsed.clear();
+    changesMemory.collapsedGroups.clear();
+    changesMemory.selectedFiles.clear();
     saveSelection();
     render();
     void refresh();
@@ -123,11 +165,18 @@ export function mountWorkbench(root: HTMLElement, store: Store, isVisible: () =>
   /** Serialize reads and invalidate replies on either workspace or repository changes. */
   async function refresh(): Promise<void> {
     const state = store.get();
-    const selected = state.selection.projectId;
-    if (inFlight || openSurface !== "changes" || !isVisible() || state.host.status !== "ready" || selected === undefined) return;
+    // Read the project this panel's repository state belongs to, never the
+    // live selection directly: store watchers are batched to animation
+    // frames (which pause while the window is hidden), so the selection can
+    // change before the watcher below resets `repositories`. Mixing the new
+    // project with the old repository paths read the wrong folder. When they
+    // differ, wait; the watcher resets the panel and refreshes.
+    const selected = projectId;
+    if (inFlight || openSurface !== "changes" || !isVisible() || state.host.status !== "ready" || selected === undefined
+      || selected !== state.selection.projectId) return;
     inFlight = true;
     const version = generation;
-    const current = () => generation === version && store.get().selection.projectId === selected;
+    const current = () => generation === version && projectId === selected && store.get().selection.projectId === selected;
     try {
       if (repositories === undefined) {
         let found = await controller.discoverProjectRepositories(selected, discoveryOptions);
@@ -175,23 +224,42 @@ export function mountWorkbench(root: HTMLElement, store: Store, isVisible: () =>
   function renderChanges(): HTMLElement {
     const project = store.get().projects.find((candidate) => candidate.id === projectId);
     const paths = repository === "" ? repositories?.paths ?? [] : repository === undefined ? [] : [repository];
-    return h("div", { class: "changes-content" },
+    const actions = h("button", { class: "icon-button", type: "button", title: "Repository options", aria: { label: "Repository options", haspopup: "menu" }, onClick: () => {
+      const menu = h("div", { class: "menu", role: "menu" });
+      const choices = [
+        { label: "Rescan repositories", action: () => rescan() },
+        { label: "Scan deeper", action: () => rescan({ deep: true }) },
+        { label: "Choose repository folder", action: () => void chooseFolder() },
+      ];
+      const popover = openPopover({ anchor: actions, content: menu, minWidth: 210, align: "end" });
+      const items = choices.map((choice) => h("button", { class: "menu-item", type: "button", role: "menuitem", onClick: () => {
+        popover.close(); actions.focus(); choice.action();
+      } }, choice.label));
+      menu.append(...items);
+      popover.reposition(); items[0]?.focus();
+      menu.addEventListener("keydown", (event) => {
+        const index = items.indexOf(document.activeElement as HTMLButtonElement);
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault(); items[(index + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus();
+        } else if (event.key === "Tab") { actions.focus(); popover.close(); }
+      });
+    } }, icon("dots-three"));
+    return h("div", { class: "git-changes-content" },
       h("div", { class: "changes-heading" },
-        h("span", { class: "note", title: project?.path ?? "" }, project?.path ?? "Select a project"),
-        h("button", { class: "icon-button", type: "button", title: "Refresh changes", aria: { label: "Refresh changes" }, onClick: () => void refresh() }, icon("arrow-clockwise"))),
-      projectId === undefined ? null : h("div", { class: "repository-controls" },
-        repositories?.paths.length ? h("select", { aria: { label: "Repository" }, onChange: (event) => chooseRepository((event.target as HTMLSelectElement).value) },
-          h("option", { value: "", selected: repository === "" }, "All repositories"),
-          ...repositories.paths.map((path) => h("option", { value: path, selected: path === repository }, path === "." ? "Workspace repository" : path))) : null,
-        h("div", { class: "repository-actions" },
-          h("button", { class: "meta-link", type: "button", onClick: () => rescan() }, "Rescan"),
-          h("button", { class: "meta-link", type: "button", onClick: () => rescan({ deep: true }) }, "Scan deeper"),
-          h("button", { class: "meta-link", type: "button", onClick: () => void chooseFolder() }, "Choose folder"))),
-      h("p", { class: "changes-note" }, "Current changes, including pre-existing edits. Repository selection only changes this view."),
+        h("span", { class: "git-workspace-name", title: project?.path ?? "" }, project?.path.split("/").at(-1) ?? "Select a project"),
+        h("button", { class: "icon-button", type: "button", title: "Refresh changes", aria: { label: "Refresh changes" }, onClick: () => void refresh() }, icon("arrow-clockwise")),
+        projectId === undefined ? null : actions),
+      (repositories?.paths.length ?? 0) > 1 ? h("div", { class: "git-repository-picker" }, (() => {
+          repositoryPicker.setOptions([
+            { value: ALL_REPOSITORIES, label: "All repositories", icon: "files" },
+            ...(repositories?.paths ?? []).map((path) => ({ value: path, label: path === "." ? "Project repository" : path, icon: "git-diff" as const })),
+          ], repository === "" ? ALL_REPOSITORIES : repository);
+          return repositoryPicker.element;
+        })()) : null,
       error !== undefined ? h("p", { class: "error-line" }, error)
         : projectId === undefined ? h("p", { class: "note" }, "Open a session to see its project changes.")
         : repositories === undefined ? h("p", { class: "note" }, "Finding repositories…")
-        : repositories.paths.length === 0 ? h("p", { class: "note" }, "No repositories found. Scan deeper or choose a folder inside this workspace.") : null,
+        : repositories.paths.length === 0 ? h("p", { class: "note" }, "No repositories found. Scan deeper or choose a folder inside this project.") : null,
       repositories?.limited ? h("p", { class: "note" }, "Discovery reached its scan limit. Scan deeper or choose a repository folder.") : null,
       ...(repositories?.warnings ?? []).map((warning) => h("p", { class: "note" }, warning)),
       ...paths.map((path) => renderRepository(path)),
@@ -200,36 +268,24 @@ export function mountWorkbench(root: HTMLElement, store: Store, isVisible: () =>
 
   function renderRepository(path: string): HTMLElement {
     const result = snapshots.get(path);
-    const snapshot = result?.snapshot;
-    const files = diffFiles(snapshot?.diff ?? "");
-    return h("section", { class: "repository-changes", aria: { label: path } },
-      h("h3", { class: "repository-title" }, path === "." ? "Workspace repository" : path),
-      result?.error ? h("p", { class: "error-line" }, result.error)
-        : snapshot === undefined ? h("p", { class: "note" }, "Loading changes…")
-        : snapshot.status !== "ready" ? h("p", { class: "note" }, "Repository unavailable. Rescan or choose another folder.")
-        : files.length === 0 ? h("p", { class: "note" }, "No changes in this repository.") : null,
-      snapshot?.truncated ? h("p", { class: "note" }, "Large changes were shortened for this preview.") : null,
-      ...files.map((file, index) => {
-        const key = `${projectId}:${path}:${file.title}:${index}`;
-        const panel = h("details", { class: "change-file", open: !collapsed.has(key) },
-          h("summary", {}, icon("caret-right", { className: "activity-caret" }), h("span", { class: "change-path", title: file.title }, file.title),
-            h("span", { class: "change-count diff-add" }, `+${file.added}`), h("span", { class: "change-count diff-remove" }, `−${file.removed}`)),
-          h("pre", { class: "change-patch" }, h("code", {}, ...file.lines.map((line) => h("span", {
-            class: line.startsWith("@@") || /^(diff --git|---|\+\+\+|index |new file|deleted file)/.test(line) ? "diff-header" : line.startsWith("+") ? "diff-add" : line.startsWith("-") ? "diff-remove" : "diff-context",
-          }, line || " ")))));
-        panel.addEventListener("toggle", () => {
-          if (!panel.isConnected) return;
-          if (panel.open) collapsed.delete(key); else collapsed.add(key);
-        });
-        return panel;
-      }),
-    );
+    const project = store.get().projects.find((candidate) => candidate.id === projectId);
+    return renderRepositoryChanges({
+      key: `${projectId}:${path}`, label: path === "." ? project?.path.split("/").at(-1) ?? "Repository" : path,
+      ...(result?.snapshot === undefined ? {} : { snapshot: result.snapshot }), ...(result?.error === undefined ? {} : { error: result.error }),
+      memory: changesMemory, redraw: render, openFile: (filePath) => {
+        if (project !== undefined) void controller.openPath(filePath, path === "." ? project.path : `${project.path}/${path}`);
+      },
+    });
   }
 
   // Poll current filesystem changes even when a tool produces no native diff.
   // Refresh also follows project selection and run start/finish, independently
   // of chat deltas, so streaming text never starts a Git process per token.
   const interval = window.setInterval(() => void refresh(), 2000);
+  // Hidden windows throttle timers; catch up as soon as the window is shown.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void refresh();
+  });
   window.addEventListener("beforeunload", () => window.clearInterval(interval), { once: true });
   store.watch((state) => [state.selection.projectId, state.host.status, state.runs, Object.keys(state.live).join("|")], () => {
     const selected = store.get().selection.projectId;
@@ -241,7 +297,8 @@ export function mountWorkbench(root: HTMLElement, store: Store, isVisible: () =>
       generation++;
       snapshots.clear();
       error = undefined;
-      collapsed.clear();
+      changesMemory.collapsedGroups.clear();
+      changesMemory.selectedFiles.clear();
       render();
     }
     void refresh();
@@ -263,6 +320,9 @@ export function mountWorkbench(root: HTMLElement, store: Store, isVisible: () =>
     if (openSurface === "run-details") render();
   });
 }
+
+/** Picker value for "All repositories"; the panel stores it as "". */
+const ALL_REPOSITORIES = "__all__";
 
 function renderLauncher(surfaces: readonly SurfaceDefinition[], open: (id: string) => void): HTMLElement {
   return h("div", { class: "launcher" },

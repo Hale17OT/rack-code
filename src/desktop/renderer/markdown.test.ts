@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseInline, parseMarkdown } from "./markdown.js";
+import { isPathLike, parseInline, parseMarkdown } from "./markdown.js";
 
 test("paragraphs, headings, lists, quotes, and fenced code are recognized", () => {
   const blocks = parseMarkdown([
@@ -82,4 +82,32 @@ test("prose with pipes and incomplete delimiter rows stay paragraphs", () => {
   assert.deepEqual(parseMarkdown("run ls | wc -l now").map((block) => block.type), ["paragraph"]);
   // Mid-stream: the delimiter row has fewer cells than the header so far.
   assert.deepEqual(parseMarkdown("| a | b |\n| --- |").map((block) => block.type), ["paragraph"]);
+});
+
+test("bare URLs link with trailing punctuation trimmed", () => {
+  assert.deepEqual(parseInline("see https://example.com/a?b=1. Then (https://x.dev/p)."), [
+    { type: "text", text: "see " },
+    { type: "link", href: "https://example.com/a?b=1", children: [{ type: "text", text: "https://example.com/a?b=1" }] },
+    { type: "text", text: ". Then (" },
+    { type: "link", href: "https://x.dev/p", children: [{ type: "text", text: "https://x.dev/p" }] },
+    { type: "text", text: ")." },
+  ]);
+});
+
+test("file paths in text and inline code become path inlines; prose with slashes does not", () => {
+  assert.deepEqual(parseInline("Edit src/app.ts:42, then `./scripts/run` and ~/notes/todo.md."), [
+    { type: "text", text: "Edit " },
+    { type: "path", path: "src/app.ts:42", code: false },
+    { type: "text", text: ", then " },
+    { type: "path", path: "./scripts/run", code: true },
+    { type: "text", text: " and " },
+    { type: "path", path: "~/notes/todo.md", code: false },
+    { type: "text", text: "." },
+  ]);
+  for (const prose of ["and/or", "n/a", "km/h", "2026/10/14", "client/server model", "`npm run build`"]) {
+    assert.ok(!parseInline(prose).some((inline) => inline.type === "path"), prose);
+  }
+  assert.equal(isPathLike("/Users/me/project"), true);
+  assert.equal(isPathLike("docs/architecture.md"), true);
+  assert.equal(isPathLike("src/components"), false);
 });

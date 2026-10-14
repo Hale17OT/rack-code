@@ -14,6 +14,8 @@ export interface ToolPresentation {
   readonly duration?: string;
   readonly exitCode?: number;
   readonly sections: readonly ToolSection[];
+  /** File or folder the tool acted on, when there is exactly one; clickable in the UI. */
+  readonly path?: string;
 }
 
 export function presentTool(item: Extract<TranscriptItem, { kind: "tool" }>, active: boolean): ToolPresentation {
@@ -56,6 +58,7 @@ export function presentTool(item: Extract<TranscriptItem, { kind: "tool" }>, act
   }
   const durationMs = number(output.durationMs) ?? number(output.duration_ms);
   return { title, ...(subtitle === undefined ? {} : { subtitle }),
+    ...(command === undefined && changes.length === 0 && path !== undefined ? { path } : changes.length === 1 && string(object(changes[0]).path) !== undefined ? { path: string(object(changes[0]).path)! } : {}),
     icon: command !== undefined ? "terminal-window" : changes.length > 0 ? "pencil-simple" : path !== undefined ? "files" : query !== undefined ? "globe" : "wrench",
     status: item.finished ? isError ? "Failed" : stopped ? "Stopped" : "Completed" : active ? "Running" : "Incomplete",
     ...(durationMs === undefined ? {} : { duration: durationMs < 1000 ? `${Math.round(durationMs)} ms` : `${(durationMs / 1000).toFixed(1)} s` }),

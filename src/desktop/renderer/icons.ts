@@ -69,10 +69,23 @@ import Files from "@phosphor-icons/core/assets/regular/files.svg";
 import ClockCounterClockwise from "@phosphor-icons/core/assets/regular/clock-counter-clockwise.svg";
 import Lightbulb from "@phosphor-icons/core/assets/regular/lightbulb.svg";
 import Brain from "@phosphor-icons/core/assets/regular/brain.svg";
+import Gauge from "@phosphor-icons/core/assets/regular/gauge.svg";
 import FlowArrow from "@phosphor-icons/core/assets/regular/flow-arrow.svg";
 import ArrowLeft from "@phosphor-icons/core/assets/regular/arrow-left.svg";
+import Clipboard from "@phosphor-icons/core/assets/regular/clipboard.svg";
+import Image from "@phosphor-icons/core/assets/regular/image.svg";
+import FileText from "@phosphor-icons/core/assets/regular/file-text.svg";
+import Code from "@phosphor-icons/core/assets/regular/code.svg";
+import ArrowUpRight from "@phosphor-icons/core/assets/regular/arrow-up-right.svg";
+import DotsThree from "@phosphor-icons/core/assets/regular/dots-three.svg";
 
 const ICONS = {
+  "arrow-up-right": ArrowUpRight,
+  "dots-three": DotsThree,
+  "clipboard": Clipboard,
+  "image": Image,
+  "file-text": FileText,
+  "code": Code,
   "folder-simple": FolderSimple,
   "folder-open": FolderOpen,
   "folder-simple-plus": FolderSimplePlus,
@@ -133,6 +146,7 @@ const ICONS = {
   "clock-counter-clockwise": ClockCounterClockwise,
   "lightbulb": Lightbulb,
   "brain": Brain,
+  "gauge": Gauge,
   "flow-arrow": FlowArrow,
   "arrow-left": ArrowLeft,
 } as const;

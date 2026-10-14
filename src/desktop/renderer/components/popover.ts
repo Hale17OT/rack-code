@@ -31,6 +31,8 @@ export interface PopoverOptions {
   readonly maxHeight?: number;
   /** Horizontal alignment relative to the anchor. */
   readonly align?: "start" | "end";
+  /** Attachment actions explicitly open upward; other menus choose the available side. */
+  readonly placement?: "above" | "auto";
   readonly onClose?: () => void;
 }
 
@@ -39,6 +41,8 @@ const DEFAULT_MAX_HEIGHT = 320;
 
 export interface PopoverHandle {
   readonly element: HTMLElement;
+  /** Re-anchor after replacing content, for example a model list becoming a slider. */
+  reposition(): void;
   close(): void;
 }
 
@@ -72,6 +76,11 @@ export function openPopover(options: PopoverOptions): PopoverHandle {
 
   const handle: PopoverHandle = {
     element,
+    reposition() {
+      if (closed) return;
+      element.style.maxHeight = "";
+      position(element, options);
+    },
     close() {
       if (closed) return;
       closed = true;
@@ -108,7 +117,7 @@ function position(element: HTMLElement, options: PopoverOptions): void {
   const height = Math.min(element.offsetHeight, cap);
   const below = window.innerHeight - rect.bottom - gap - margin;
   const above = rect.top - gap - margin;
-  const openAbove = height > below && above > below;
+  const openAbove = options.placement === "above" || (height > below && above > below);
   const available = Math.min(openAbove ? above : below, cap);
   element.style.maxHeight = `${available}px`;
   element.style.top = openAbove

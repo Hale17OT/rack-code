@@ -23,6 +23,14 @@ export class ContractValidationError extends Error {
 /** Parses an unknown value into `T` or throws `ContractValidationError`. */
 export type Validator<T> = (value: unknown, path: string) => T;
 
+/** Bounded arrays prevent a renderer from requesting an unbounded file batch. */
+export function array<T>(item: Validator<T>, maxLength: number): Validator<readonly T[]> {
+  return (value, path) => {
+    if (!Array.isArray(value) || value.length > maxLength) throw new ContractValidationError(path, `expected an array of at most ${maxLength} items`);
+    return value.map((entry, index) => item(entry, `${path}[${index}]`));
+  };
+}
+
 /** Boolean flags accept no coercion from strings or numbers. */
 export const boolean: Validator<boolean> = (value, path) => {
   if (typeof value !== "boolean") throw new ContractValidationError(path, "expected a boolean");

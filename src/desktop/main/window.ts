@@ -41,8 +41,9 @@ export function createMainWindow(options: MainWindowOptions): BrowserWindow {
 
   window.webContents.on("will-navigate", (event) => event.preventDefault());
   window.webContents.setWindowOpenHandler(({ url }) => {
-    // External links open in the user's browser, never inside the app.
-    if (url.startsWith("https://")) {
+    // External web links open in the user's browser, never inside the app.
+    // Other schemes (file:, javascript:, custom protocols) are refused.
+    if (url.startsWith("https://") || url.startsWith("http://")) {
       void shell.openExternal(url);
     }
     return { action: "deny" };

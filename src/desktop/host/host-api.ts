@@ -171,6 +171,7 @@ export class HostApi {
         return session;
       },
       "sessions.get": async (params) => sessions.get(params.sessionId),
+      "sessions.attachFiles": async (params) => sessions.attachFiles(params.sessionId, params.paths),
       "sessions.discover": async (params) => sessionImports.discover(params.projectId),
       "sessions.previewImport": async (params) => {
         const snapshot = await sessionImports.preview(params.projectId, params.sourceId, params.nativeSessionId);

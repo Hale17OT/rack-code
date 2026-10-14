@@ -6,7 +6,8 @@
  *   "Show full message" toggle;
  * - the reply is plain text in the page (no bubble), rendered as Markdown.
  *   Live and persisted event folds show streamed text, readable thinking
- *   panels, and formatted command/file activity cards. Completed turns keep
+ *   panels, and consecutive command/file activity in collapsible groups.
+ *   Each call retains its own details inside the group. Completed turns keep
  *   their activity after reload; the saved assistant message is a fallback;
  * - pending approvals are not part of the transcript. The composer renders
  *   them in an overlay above the prompt (see `composer.ts`);
@@ -19,22 +20,25 @@
  *
  * The transcript re-renders on every state change (batched per frame), so
  * presentation state that must survive a re-render (expanded prompts,
- * opened tool rows) lives in closure sets keyed by stable IDs.
+ * opened tool rows/groups) lives in closure sets keyed by stable IDs.
  */
 import type {
   RunView,
   SessionView,
   ProjectView,
   RuntimeEvent,
+  SessionMessageView,
 } from "../../../contracts/desktop/index.js";
 import type { Controller } from "../controller.js";
 import { formatTime, h, replace, shortId } from "../dom.js";
 import { icon } from "../icons.js";
-import { renderMarkdown } from "../markdown.js";
+import { renderMarkdown, type MarkdownActions } from "../markdown.js";
 import type { AppState, Store } from "../store.js";
 import { foldEvents, type TranscriptItem, type TranscriptState } from "../transcript.js";
 import { accountLabel, isActiveStatus } from "./run-format.js";
 import { importedTool, presentTool } from "./tool-presentation.js";
+import { formatAttachmentSize } from "./attachments.js";
+import { groupConsecutiveTools, type ToolItem } from "./tool-groups.js";
 
 /** Prompts longer than this (characters or lines) start clipped. */
 const LONG_PROMPT_CHARS = 600;
@@ -45,6 +49,7 @@ const AT_END_THRESHOLD = 48;
 interface ViewMemory {
   readonly expandedPrompts: Set<string>;
   readonly openTools: Set<string>;
+  readonly openToolGroups: Set<string>;
   readonly collapsedThinking: Set<string>;
 }
 
@@ -58,7 +63,7 @@ export function mountSessionView(root: HTMLElement, header: HTMLElement, store: 
   scrollToEnd.hidden = true;
   root.append(transcript, rail, scrollToEnd);
 
-  const memory: ViewMemory = { expandedPrompts: new Set(), openTools: new Set(), collapsedThinking: new Set() };
+  const memory: ViewMemory = { expandedPrompts: new Set(), openTools: new Set(), openToolGroups: new Set(), collapsedThinking: new Set() };
   let current: AppState | undefined;
   const rerender = () => {
     if (current !== undefined) draw(current, false);
@@ -151,15 +156,34 @@ function renderTranscript(
   return [
     ...(session.importSource === undefined ? [] : [h("div", { class: "import-history-note note" }, icon("database"),
       `Imported from ${session.importSource.providerName}. Continuing uses recent conversation context in a new runtime session; the original remains unchanged.`)]),
-    ...imported.map((message) => h("article", { class: "turn imported-turn", data: { importedMessageId: message.id } },
-      message.role === "user" ? renderPrompt({ id: message.id, prompt: message.content }, memory, rerender)
-        : message.role === "assistant" ? h("div", { class: "reply md" }, renderMarkdown(message.content, (href) => controller.openExternal(href)))
-        : message.metadata?.["presentation"] === "thinking"
-          ? thinkingLine(message.id, memory, message.content, message.metadata?.["thinkingFormat"] === "summary" ? "summary" : "trace", (href) => controller.openExternal(href))
-          : activityLine(message.id, memory, importedTool(message.content), false),
-    )),
+    ...renderImportedHistory(imported, memory, rerender, markdownActions(controller)),
     ...runs.map((run) => renderTurn(run, state, controller, fold, memory, rerender)),
   ];
+}
+
+/** Imported tools use the same grouped disclosures while preserving each message's identity. */
+function renderImportedHistory(messages: readonly SessionMessageView[], memory: ViewMemory, rerender: () => void, actions: MarkdownActions): Node[] {
+  const nodes: Node[] = [];
+  let tools: { key: string; item: ToolItem }[] = [];
+  const flush = () => {
+    if (tools.length === 0) return;
+    nodes.push(h("article", { class: "turn imported-turn", data: { importedMessageId: tools[0]!.key } },
+      renderToolGroup(`import:${tools[0]!.key}`, tools, memory, actions, false)));
+    tools = [];
+  };
+  for (const message of messages) {
+    if (message.role !== "user" && message.role !== "assistant" && message.metadata?.["presentation"] !== "thinking") {
+      tools.push({ key: message.id, item: importedTool(message.content) });
+      continue;
+    }
+    flush();
+    nodes.push(h("article", { class: "turn imported-turn", data: { importedMessageId: message.id } },
+      message.role === "user" ? renderPrompt({ id: message.id, prompt: message.content }, memory, rerender)
+        : message.role === "assistant" ? h("div", { class: "reply md" }, renderMarkdown(message.content, actions))
+          : thinkingLine(message.id, memory, message.content, message.metadata?.["thinkingFormat"] === "summary" ? "summary" : "trace", actions)));
+  }
+  flush();
+  return nodes;
 }
 
 function renderTurn(
@@ -173,15 +197,18 @@ function renderTurn(
   const live = state.live[stored.id];
   const run = live?.run ?? stored;
   const account = state.accounts.find((candidate) => candidate.id === run.accountId);
-  const openLink = (href: string) => controller.openExternal(href);
+  const actions = markdownActions(controller);
 
   const reply: Node[] = [];
   let copyText = "";
   const events = live?.events ?? state.transcripts[run.id];
   const folded = events === undefined ? undefined : fold(events);
   if (folded !== undefined) {
-    for (const [index, item] of folded.items.entries()) {
-      reply.push(renderItem(item, `${run.id}:${index}`, memory, openLink, live !== undefined && isActiveStatus(run.status)));
+    for (const group of groupConsecutiveTools(folded.items)) {
+      const active = live !== undefined && isActiveStatus(run.status);
+      reply.push(group.kind === "item"
+        ? renderItem(group.item, `${run.id}:${group.index}`, memory, actions, active)
+        : renderToolGroup(`${run.id}:tools:${group.index}`, group.items.map((item, offset) => ({ key: `${run.id}:${group.index + offset}`, item })), memory, actions, active));
     }
     copyText = folded.items.flatMap((item) => item.kind === "text" ? [item.text] : []).join("\n\n");
     if (folded.failure !== undefined) reply.push(errorLine(folded.failure.error));
@@ -195,7 +222,7 @@ function renderTurn(
     if (copyText === "") {
       const assistant = state.session?.messages.find((message) => message.role === "assistant" && message.metadata?.["runId"] === run.id);
       copyText = assistant?.content ?? run.result ?? "";
-      if (copyText !== "") reply.push(h("div", { class: "md" }, renderMarkdown(copyText, openLink)));
+      if (copyText !== "") reply.push(h("div", { class: "md" }, renderMarkdown(copyText, actions)));
     }
     if (run.error !== undefined && folded?.failure === undefined) reply.push(errorLine(run.error));
     if (run.status === "interrupted" && !folded?.items.some((item) => item.kind === "status" && item.label === "interrupted")) reply.push(h("div", { class: "note" }, icon("stop-circle"), "Stopped"));
@@ -223,17 +250,24 @@ function renderTurn(
   }
 
   return h("article", { class: "turn", data: { runId: run.id } },
-    renderPrompt(run, memory, rerender),
+    renderPrompt(run, memory, rerender, controller),
     h("div", { class: "reply" }, ...reply, meta),
   );
 }
 
-function renderPrompt(run: Pick<RunView, "id" | "prompt">, memory: ViewMemory, rerender: () => void): HTMLElement {
+function renderPrompt(run: Pick<RunView, "id" | "prompt" | "attachments">, memory: ViewMemory, rerender: () => void, controller?: Controller): HTMLElement {
   const long = run.prompt.length > LONG_PROMPT_CHARS || run.prompt.split("\n").length > LONG_PROMPT_LINES;
   const expanded = memory.expandedPrompts.has(run.id);
   return h("div", { class: "prompt-row" },
     h("div", { class: long && !expanded ? "bubble clipped" : "bubble" },
-      h("div", { class: "bubble-text" }, run.prompt),
+      run.prompt === "" ? null : h("div", { class: "bubble-text" }, run.prompt),
+      (run.attachments?.length ?? 0) === 0 ? null : h("div", { class: "attachment-list turn-attachments", aria: { label: "Attached files" } },
+        ...(run.attachments ?? []).map((file) => h("button", {
+          class: "attachment-chip attachment-file", type: "button", title: file.path,
+          aria: { label: `Open attachment ${file.name}` }, onClick: () => void controller?.openPath(file.path),
+        }, icon("file-text"), h("span", { class: "attachment-name" }, file.name),
+          h("span", { class: "attachment-size" }, formatAttachmentSize(file.size)))),
+      ),
       !long ? null : h("button", {
         class: "bubble-toggle",
         onClick: () => {
@@ -248,12 +282,12 @@ function renderPrompt(run: Pick<RunView, "id" | "prompt">, memory: ViewMemory, r
 
 function renderItem(
   item: TranscriptItem, key: string, memory: ViewMemory,
-  openLink: (href: string) => void, active: boolean,
+  actions: MarkdownActions, active: boolean,
 ): Node {
   switch (item.kind) {
-    case "text": return h("div", { class: "md" }, renderMarkdown(item.text, openLink));
-    case "thinking": return thinkingLine(key, memory, item.text, item.format, openLink);
-    case "tool": return activityLine(key, memory, item, active);
+    case "text": return h("div", { class: "md" }, renderMarkdown(item.text, actions));
+    case "thinking": return thinkingLine(key, memory, item.text, item.format, actions);
+    case "tool": return activityLine(key, memory, item, active, actions.openPath);
     case "tool_output": return activityLine(key, memory, {
       kind: "tool", tool: "Tool output", input: undefined, output: item.output, hasOutput: true, finished: true,
     }, false);
@@ -261,8 +295,33 @@ function renderItem(
   }
 }
 
+/** A growing contiguous tool sequence keeps one stable group key through streaming redraws. */
+function renderToolGroup(key: string, entries: readonly { key: string; item: ToolItem }[], memory: ViewMemory, actions: MarkdownActions, active: boolean): HTMLElement {
+  const tools = entries.map(({ item }) => item.kind === "tool" ? item : {
+    kind: "tool" as const, tool: "Tool output", input: undefined, output: item.output, hasOutput: true, finished: true,
+  });
+  if (entries.length === 1) return activityLine(entries[0]!.key, memory, tools[0]!, active, actions.openPath);
+  const views = tools.map((item) => presentTool(item, active));
+  const failed = views.filter((view) => view.status === "Failed").length;
+  const running = views.filter((view) => view.status === "Running").length;
+  const status = running > 0 ? `${running} running` : failed > 0 ? `${failed} failed`
+    : views.some((view) => view.status === "Stopped") ? "Stopped" : views.every((view) => view.status === "Completed") ? "Completed" : "Recorded";
+  const details = h("details", { class: `tool-group${failed > 0 ? " has-failures" : ""}`, open: memory.openToolGroups.has(key), data: { toolGroup: key } },
+    h("summary", {}, icon("stack"), h("span", { class: "tool-group-title" }, `${entries.length} tool calls`),
+      h("span", { class: "tool-group-status" }, running > 0 ? icon("circle-notch", { className: "spin" }) : null, status),
+      icon("caret-right", { className: "activity-caret" })),
+    h("div", { class: "tool-group-body" }, ...tools.map((item, index) => activityLine(entries[index]!.key, memory, item, active, actions.openPath))),
+  );
+  details.addEventListener("toggle", () => {
+    // Detached disclosures can still deliver queued toggle events after a redraw.
+    if (!details.isConnected) return;
+    if (details.open) memory.openToolGroups.add(key); else memory.openToolGroups.delete(key);
+  });
+  return details;
+}
+
 /** Activity starts as a compact status row; details appear only on user expansion. */
-function activityLine(key: string, memory: ViewMemory, item: Extract<TranscriptItem, { kind: "tool" }>, active: boolean): HTMLElement {
+function activityLine(key: string, memory: ViewMemory, item: Extract<TranscriptItem, { kind: "tool" }>, active: boolean, openPath?: (path: string) => void): HTMLElement {
   const view = presentTool(item, active);
   const running = view.status === "Running";
   const details = h("details", { class: `activity-card${view.status === "Failed" ? " failed" : ""}`, open: memory.openTools.has(key) },
@@ -272,7 +331,16 @@ function activityLine(key: string, memory: ViewMemory, item: Extract<TranscriptI
         h("span", { class: "activity-title" }, view.title === "Run command"
           ? `${running ? "Running" : view.status === "Completed" ? "Ran" : view.status} command`
           : `${view.status} · ${view.title}`),
-        view.subtitle === undefined ? null : h("code", { class: "activity-target", title: view.subtitle }, view.subtitle)),
+        view.subtitle === undefined ? null
+          // File activity targets are clickable; the click must not also
+          // toggle the surrounding <details> summary.
+          : view.path !== undefined && openPath !== undefined
+            ? h("code", { class: "activity-target activity-path", title: `Open ${view.path}`, role: "link", onClick: (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              openPath(view.path!);
+            } }, view.subtitle)
+            : h("code", { class: "activity-target", title: view.subtitle }, view.subtitle)),
       h("span", { class: "activity-meta" },
         view.duration === undefined ? null : h("span", {}, view.duration),
         view.exitCode === undefined ? null : h("span", {}, `exit ${view.exitCode}`),
@@ -286,6 +354,7 @@ function activityLine(key: string, memory: ViewMemory, item: Extract<TranscriptI
     ))),
   );
   details.addEventListener("toggle", () => {
+    if (!details.isConnected) return;
     if (details.open) memory.openTools.add(key); else memory.openTools.delete(key);
   });
   return details;
@@ -301,9 +370,9 @@ function activityLine(key: string, memory: ViewMemory, item: Extract<TranscriptI
  * activity presentation), so the kind is carried by the button's accessible
  * name and tooltip rather than a visible heading.
  */
-function thinkingLine(key: string, memory: ViewMemory, text: string, format: "trace" | "summary" | undefined, openLink: (href: string) => void): HTMLElement {
+function thinkingLine(key: string, memory: ViewMemory, text: string, format: "trace" | "summary" | undefined, actions: MarkdownActions): HTMLElement {
   const kind = format === "summary" ? "Reasoning summary" : format === "trace" ? "Thinking trace" : "Thinking";
-  const prose = h("div", { class: "thinking-prose md" }, renderMarkdown(text, openLink));
+  const prose = h("div", { class: "thinking-prose md" }, renderMarkdown(text, actions));
   const toggle = h("button", { class: "thinking-toggle", type: "button" }, icon("lightbulb"));
   const panel = h("div", { class: "thinking-panel", data: { format: format ?? "unknown" } }, toggle, prose);
   const sync = () => {
@@ -319,6 +388,11 @@ function thinkingLine(key: string, memory: ViewMemory, text: string, format: "tr
   });
   sync();
   return panel;
+}
+
+/** Links open in the browser; paths open through main, relative to the session's project. */
+function markdownActions(controller: Controller): MarkdownActions {
+  return { openLink: (href) => controller.openExternal(href), openPath: (path) => void controller.openPath(path) };
 }
 
 function errorLine(text: string): HTMLElement {

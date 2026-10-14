@@ -12,6 +12,13 @@ export interface SessionMessage {
 
 export interface NativeContinuationReference {
   readonly runtimeId: string;
+  /**
+   * Account runtime context (for example a Codex `CODEX_HOME`) that stores the
+   * native thread. Native IDs only resolve inside the context that created
+   * them, so a continuation is never reused by another account. Records saved
+   * before this field existed lack it and are not resumed.
+   */
+  readonly runtimeContextId?: string;
   readonly nativeSessionId: string;
   readonly seenThroughMessageId?: string;
 }

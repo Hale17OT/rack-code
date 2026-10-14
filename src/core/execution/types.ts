@@ -1,4 +1,5 @@
 import type { CredentialReference } from "../authentication/index.js";
+import type { SessionAttachment } from "../sessions/attachments.js";
 
 export type RunId = string;
 export type AttemptId = string;
@@ -43,6 +44,12 @@ export interface RuntimeRunInput {
    * and must fail the attempt rather than silently drop an unsupported value.
    */
   readonly reasoningEffort?: string;
+  /**
+   * Speed option chosen from the model's `speeds`. Omitted means the
+   * provider default. Like effort, adapters forward it to the native control
+   * and fail the attempt rather than silently ignore an unsupported value.
+   */
+  readonly speed?: string;
   readonly permissionMode: PermissionMode;
   readonly continuation?: RuntimeContinuation;
   readonly signal: AbortSignal;
@@ -75,6 +82,25 @@ export interface RuntimeModel {
   readonly reasoningEfforts?: readonly ReasoningEffortOption[];
   /** The provider's default level for this model, when it reports one. */
   readonly defaultReasoningEffort?: string;
+  /**
+   * Speed options the provider reports for this model (for example Codex
+   * service tiers, or Claude standard/fast mode). Absent or empty means the
+   * model has no selectable speed. Eligibility, pricing, and fallback for a
+   * speed are provider behavior; the app only passes the choice through.
+   */
+  readonly speeds?: readonly SpeedOption[];
+  /** The provider's default speed for this model, when it reports one. */
+  readonly defaultSpeed?: string;
+}
+
+/** One selectable speed option, labelled by the provider or its adapter. */
+export interface SpeedOption {
+  /** Adapter-owned mapping for the compact Fast switch; absent means no binary mapping. */
+  readonly fast?: boolean;
+  /** Provider value, sent unchanged when the option is chosen. */
+  readonly id: string;
+  readonly label: string;
+  readonly description?: string;
 }
 
 /** One selectable reasoning effort level. */
@@ -125,6 +151,8 @@ export interface RuntimeAdapter {
 }
 
 export interface RunRecord {
+  /** Session-owned copies selected for this turn; persisted for transcript rendering. */
+  readonly attachments?: readonly SessionAttachment[];
   readonly id: RunId;
   readonly sessionId: string;
   readonly projectId: string;
@@ -134,6 +162,8 @@ export interface RunRecord {
   readonly model?: string;
   /** Requested reasoning effort; absent means the provider default. */
   readonly reasoningEffort?: string;
+  /** Requested speed option; absent means the provider default. */
+  readonly speed?: string;
   readonly permissionMode: PermissionMode;
   readonly status: RunStatus;
   readonly attemptIds: readonly AttemptId[];

@@ -10,6 +10,7 @@ import type {
   RuntimeEvent,
   ReasoningEffortOption,
   RuntimeModel,
+  SpeedOption,
   RuntimeModelInput,
   RuntimeRunInput,
 } from "../../core/execution/types.js";
@@ -111,6 +112,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           ...(entry.isDefault === true || current?.isDefault === true ? { isDefault: true } : {}),
           ...(efforts.length > 0 ? { reasoningEfforts: efforts } : current?.reasoningEfforts === undefined ? {} : { reasoningEfforts: current.reasoningEfforts }),
           ...(defaultEffort === undefined ? {} : { defaultReasoningEffort: defaultEffort }),
+          ...codexSpeeds(entry, current),
         });
       }
       cursor = typeof response.nextCursor === "string" ? response.nextCursor : undefined;
@@ -210,6 +212,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         // turns, so each Rack turn sends its own choice (or none, keeping the
         // model default). Codex validates the value against the model.
         ...(input.reasoningEffort === undefined ? {} : { effort: input.reasoningEffort }),
+        // `serviceTierForTurn` applies only to the turn being started and
+        // leaves the thread's tier untouched, so each Rack turn carries its
+        // own choice. Codex documents "default" as standard speed.
+        ...(input.speed === undefined ? {} : { serviceTierForTurn: input.speed }),
       });
       turnId = readString(turnResponse, ["turn", "id"]);
       if (turnId === undefined) {
@@ -496,4 +502,44 @@ function codexReasoningEfforts(value: unknown): ReasoningEffortOption[] {
     options.push({ id, ...(typeof entry.description === "string" && entry.description !== "" ? { description: entry.description } : {}) });
   }
   return options;
+}
+
+/** Codex's documented service tier value for standard speed. */
+const CODEX_STANDARD_TIER = "default";
+
+/**
+ * Reads speed options from `model/list`: `serviceTiers`
+ * (`[{ id, name, description }]`) with `defaultServiceTier`, falling back to
+ * the deprecated `additionalSpeedTiers` string list. Codex treats a null
+ * default as standard speed, so a "Standard" option (`"default"`) is added
+ * when the provider lists other tiers, letting the user return to it.
+ */
+function codexSpeeds(entry: Record<string, unknown>, current: RuntimeModel | undefined): Pick<RuntimeModel, "speeds" | "defaultSpeed"> {
+  const tiers: SpeedOption[] = [];
+  const add = (id: unknown, name: unknown, description: unknown) => {
+    if (typeof id !== "string" || id.trim() === "" || tiers.some((tier) => tier.id === id)) return;
+    tiers.push({
+      id,
+      // Interpret Codex tier semantics here, never by provider ID in the UI.
+      ...(id === "priority" || id === "fast" ? { fast: true } : id === CODEX_STANDARD_TIER ? { fast: false } : {}),
+      label: typeof name === "string" && name.trim() !== "" ? name : id,
+      ...(typeof description === "string" && description !== "" ? { description } : {}),
+    });
+  };
+  if (Array.isArray(entry.serviceTiers)) {
+    for (const raw of entry.serviceTiers) {
+      const tier = asRecord(raw);
+      add(tier.id, tier.name, tier.description);
+    }
+  } else if (Array.isArray(entry.additionalSpeedTiers)) {
+    for (const id of entry.additionalSpeedTiers) add(id, id, undefined);
+  }
+  if (tiers.length === 0) {
+    return current?.speeds === undefined ? {} : { speeds: current.speeds, ...(current.defaultSpeed === undefined ? {} : { defaultSpeed: current.defaultSpeed }) };
+  }
+  if (!tiers.some((tier) => tier.id === CODEX_STANDARD_TIER)) {
+    tiers.unshift({ id: CODEX_STANDARD_TIER, label: "Standard", fast: false, description: "Codex standard speed" });
+  }
+  const reported = typeof entry.defaultServiceTier === "string" ? entry.defaultServiceTier : CODEX_STANDARD_TIER;
+  return { speeds: tiers, defaultSpeed: tiers.some((tier) => tier.id === reported) ? reported : CODEX_STANDARD_TIER };
 }

@@ -19,6 +19,7 @@ import type {
   RuntimeModel,
   RuntimeModelInput,
   RuntimeRunInput,
+  SpeedOption,
 } from "../../core/execution/types.js";
 import { AsyncQueue } from "../../core/shared/async-queue.js";
 
@@ -77,6 +78,10 @@ export class ClaudeRuntimeAdapter implements RuntimeAdapter {
         return {
           id: entry.value, label: entry.displayName, description: entry.description, providerId: this.providerId,
           ...(levels.length > 0 ? { reasoningEfforts: levels.map((level) => ({ id: level })) } : {}),
+          // Fast mode is the only speed control Claude exposes; offer it only
+          // for models that report support. Whether a request is actually
+          // served fast (plan, usage, cooldown) is decided by Claude.
+          ...(entry.supportsFastMode === true ? { speeds: CLAUDE_SPEEDS, defaultSpeed: "standard" } : {}),
         };
       });
     } finally {
@@ -200,6 +205,9 @@ export class ClaudeRuntimeAdapter implements RuntimeAdapter {
       includePartialMessages: true,
       ...(input.model === undefined ? {} : { model: input.model }),
       ...(input.reasoningEffort === undefined ? {} : { effort: claudeEffort(input.reasoningEffort) }),
+      // Fast mode is a flag-tier setting. "standard" sends `fastMode: false`
+      // explicitly so a user-level default cannot silently turn it on.
+      ...(input.speed === undefined ? {} : { settings: { fastMode: claudeFastMode(input.speed) } }),
       ...(input.continuation === undefined ? {} : { resume: input.continuation.nativeSessionId }),
       ...(permission.bypass ? { allowDangerouslySkipPermissions: true } : {}),
     };
@@ -444,4 +452,17 @@ function claudeEffort(value: string): EffortLevel {
     throw new Error(`Claude does not support reasoning effort '${value}'.`);
   }
   return level;
+}
+
+/** Claude's speed options: the SDK's fast mode switched off or on. */
+const CLAUDE_SPEEDS: readonly SpeedOption[] = [
+  { id: "standard", label: "Standard", fast: false, description: "Claude standard speed" },
+  { id: "fast", label: "Fast", fast: true, description: "Claude fast mode, when your plan allows it" },
+];
+
+/** Maps a speed option to the SDK flag; unknown values fail the attempt visibly. */
+function claudeFastMode(value: string): boolean {
+  if (value === "fast") return true;
+  if (value === "standard") return false;
+  throw new Error(`Claude does not support speed '${value}'.`);
 }
