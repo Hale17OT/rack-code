@@ -68,6 +68,7 @@ import Globe from "@phosphor-icons/core/assets/regular/globe.svg";
 import Files from "@phosphor-icons/core/assets/regular/files.svg";
 import ClockCounterClockwise from "@phosphor-icons/core/assets/regular/clock-counter-clockwise.svg";
 import Lightbulb from "@phosphor-icons/core/assets/regular/lightbulb.svg";
+import Brain from "@phosphor-icons/core/assets/regular/brain.svg";
 import FlowArrow from "@phosphor-icons/core/assets/regular/flow-arrow.svg";
 import ArrowLeft from "@phosphor-icons/core/assets/regular/arrow-left.svg";
 
@@ -131,6 +132,7 @@ const ICONS = {
   "files": Files,
   "clock-counter-clockwise": ClockCounterClockwise,
   "lightbulb": Lightbulb,
+  "brain": Brain,
   "flow-arrow": FlowArrow,
   "arrow-left": ArrowLeft,
 } as const;

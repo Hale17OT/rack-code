@@ -6,6 +6,9 @@
  * - it is positioned with `position: fixed` against the anchor's rectangle,
  *   below the anchor when there is room and above it otherwise (the
  *   composer sits at the bottom of the window, so its menus open upward);
+ * - its height is capped (`maxHeight`, 320 px by default) so long lists such
+ *   as the model catalog scroll inside a short box instead of filling the
+ *   window; short menus keep their natural height;
  * - it closes on Escape, on a pointer press outside both the popover and its
  *   anchor, on window resize, and on scroll of any ancestor;
  * - `onClose` runs exactly once, after the element is removed.
@@ -21,10 +24,18 @@ export interface PopoverOptions {
   readonly minWidth?: number;
   /** Maximum width in pixels (default 400) so long descriptions wrap. */
   readonly maxWidth?: number;
+  /**
+   * Maximum height in pixels (default `DEFAULT_MAX_HEIGHT`). The content
+   * scrolls beyond it. The space left in the window can lower it further.
+   */
+  readonly maxHeight?: number;
   /** Horizontal alignment relative to the anchor. */
   readonly align?: "start" | "end";
   readonly onClose?: () => void;
 }
+
+/** Default height cap: about eight two-line options, then the list scrolls. */
+const DEFAULT_MAX_HEIGHT = 320;
 
 export interface PopoverHandle {
   readonly element: HTMLElement;
@@ -91,11 +102,14 @@ function position(element: HTMLElement, options: PopoverOptions): void {
   element.style.minWidth = `${Math.min(Math.max(options.minWidth ?? 0, rect.width), maxWidth)}px`;
   element.style.maxWidth = `${maxWidth}px`;
 
-  const height = element.offsetHeight;
+  // Placement uses the capped height: a long list that will scroll at the
+  // cap should not flip sides just because its full content is tall.
+  const cap = options.maxHeight ?? DEFAULT_MAX_HEIGHT;
+  const height = Math.min(element.offsetHeight, cap);
   const below = window.innerHeight - rect.bottom - gap - margin;
   const above = rect.top - gap - margin;
   const openAbove = height > below && above > below;
-  const available = openAbove ? above : below;
+  const available = Math.min(openAbove ? above : below, cap);
   element.style.maxHeight = `${available}px`;
   element.style.top = openAbove
     ? `${Math.max(margin, rect.top - gap - Math.min(height, available))}px`

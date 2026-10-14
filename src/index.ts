@@ -14,5 +14,6 @@ export * from "./core/accounts/index.js";
 export * from "./core/authentication/index.js";
 export * from "./core/connections/index.js";
 export * from "./core/execution/index.js";
-export * from "./core/workspaces/index.js";
+export * from "./core/projects/index.js";
 export * from "./core/sessions/index.js";
+export * from "./core/session-imports/index.js";

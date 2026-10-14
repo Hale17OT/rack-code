@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 
 import type { AccountsService } from "../accounts/service.js";
 import type { AccountRecord } from "../accounts/types.js";
-import type { WorkspacesService } from "../workspaces/service.js";
+import type { ProjectsService } from "../projects/service.js";
 import type { SessionsService } from "../sessions/service.js";
+import { InvalidSessionError } from "../sessions/errors.js";
 import { AccountProviderMismatchError } from "../accounts/errors.js";
 import {
   ApprovalNotFoundError,
@@ -27,12 +28,14 @@ import type {
 
 export interface StartRunInput {
   readonly sessionId: string;
-  readonly workspaceId: string;
+  readonly projectId: string;
   readonly providerId: string;
   readonly runtimeId: string;
   readonly accountId?: string;
   readonly prompt: string;
   readonly model?: string;
+  /** Reasoning effort from the model catalog; omit for the provider default. */
+  readonly reasoningEffort?: string;
   readonly permissionMode: PermissionMode;
 }
 
@@ -51,12 +54,12 @@ export interface ExecutionServiceOptions {
 }
 
 /**
- * Coordinates accounts, sessions, workspaces, persistence, and runtime
+ * Coordinates accounts, sessions, projects, persistence, and runtime
  * adapters for one editing attempt at a time.
  *
  * Provider implementations only emit normalized events. This service owns the
  * durable run/attempt state, approval parking, session associations, and
- * workspace writer release on every terminal path.
+ * project writer release on every terminal path.
  */
 export class ExecutionService {
   private readonly now: () => Date;
@@ -66,7 +69,7 @@ export class ExecutionService {
     private readonly store: ExecutionStore,
     private readonly accounts: AccountsService,
     private readonly sessions: SessionsService,
-    private readonly workspaces: WorkspacesService,
+    private readonly projects: ProjectsService,
     private readonly runtimes: RuntimeRegistry,
     options: ExecutionServiceOptions = {},
   ) {
@@ -75,8 +78,15 @@ export class ExecutionService {
   }
 
   async start(input: StartRunInput): Promise<ExecutionHandle> {
+    // A session belongs to exactly one project. Reject mismatched references
+    // before creating a run or acquiring a writer, including headless callers.
+    const session = await this.sessions.get(input.sessionId);
+    const project = await this.projects.getProject(input.projectId);
+    if (session.projectId !== project.id) {
+      throw new InvalidSessionError("The run's project must match its session's project.");
+    }
+    input = { ...input, projectId: project.id };
     const account = await this.resolveAccount(input);
-    const workspace = await this.workspaces.getWorkspace(input.workspaceId);
     const runtime = this.runtimes.get(input.runtimeId);
     const runId = this.createId();
     const attemptId = this.createId();
@@ -84,11 +94,12 @@ export class ExecutionService {
     const run: RunRecord = {
       id: runId,
       sessionId: input.sessionId,
-      workspaceId: input.workspaceId,
+      projectId: input.projectId,
       prompt: input.prompt,
       providerId: input.providerId,
       accountId: account.id,
       ...(input.model === undefined ? {} : { model: input.model }),
+      ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
       permissionMode: input.permissionMode,
       status: "queued",
       attemptIds: [attemptId],
@@ -139,7 +150,7 @@ export class ExecutionService {
       input,
       account,
       runtime,
-      workspacePath: workspace.path,
+      projectPath: project.path,
       run: currentRun,
       attempt: currentAttempt,
       controller,
@@ -225,7 +236,7 @@ export class ExecutionService {
       input,
       account,
       runtime,
-      workspacePath,
+      projectPath,
       run,
       attempt,
       controller,
@@ -248,7 +259,7 @@ export class ExecutionService {
     let terminalError: string | undefined;
 
     try {
-      await this.workspaces.acquireWriter(input.workspaceId, attempt.id);
+      await this.projects.acquireWriter(input.projectId, attempt.id);
       currentRun = await this.updateRun(currentRun, "running");
       currentAttempt = await this.updateAttempt(currentAttempt, "running");
       onRun(currentRun);
@@ -260,7 +271,7 @@ export class ExecutionService {
       });
       await this.accounts.markUsed(account.id);
 
-      const runtimeInput: RuntimeRunInput = {
+      let runtimeInput: RuntimeRunInput = {
         runId: currentRun.id,
         attemptId: currentAttempt.id,
         sessionId: input.sessionId,
@@ -270,9 +281,10 @@ export class ExecutionService {
           credential: account.credential,
           runtimeContextId: account.runtimeContextId,
         },
-        workspacePath,
+        projectPath,
         prompt: input.prompt,
         ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
         permissionMode: input.permissionMode,
         signal: controller.signal,
         requestApproval: async (request) => {
@@ -283,6 +295,17 @@ export class ExecutionService {
         },
       };
       const continuation = await this.sessions.continuation(input.sessionId, runtime.runtimeId);
+      // An external snapshot has no resumable state in Rack's isolated account
+      // context. Give a fresh native thread the recent visible conversation,
+      // quoted as historical context; do not replay tool calls or copy secrets.
+      if (continuation === undefined) {
+        const session = await this.sessions.get(input.sessionId);
+        if (session.importSource !== undefined) {
+          const context = importedConversationContext(session.messages.filter((message) =>
+            message.metadata?.["runId"] !== currentRun.id));
+          runtimeInput = { ...runtimeInput, prompt: `${context}\n\nCurrent request:\n${input.prompt}` };
+        }
+      }
       const stream = continuation === undefined
         ? runtime.startRun(runtimeInput)
         : runtime.resumeRun({ ...runtimeInput, continuation });
@@ -356,10 +379,10 @@ export class ExecutionService {
     } finally {
       approvals.close();
       try {
-        await this.workspaces.releaseWriter(input.workspaceId, currentAttempt.id);
+        await this.projects.releaseWriter(input.projectId, currentAttempt.id);
       } catch {
         // Preserve the original run outcome; a stale lock is recoverable from
-        // the workspace record and is surfaced by the next start attempt.
+        // the project record and is surfaced by the next start attempt.
       }
       currentAttempt = await this.updateAttempt(currentAttempt, terminalStatus);
       currentRun = await this.updateRun(currentRun, terminalStatus, {
@@ -415,7 +438,7 @@ interface ConsumeContext {
   readonly input: StartRunInput;
   readonly account: AccountRecord;
   readonly runtime: ReturnType<RuntimeRegistry["get"]>;
-  readonly workspacePath: string;
+  readonly projectPath: string;
   readonly run: RunRecord;
   readonly attempt: AttemptRecord;
   readonly controller: AbortController;
@@ -465,4 +488,18 @@ class ApprovalBroker {
     }
     this.pending.clear();
   }
+}
+
+/** Bound fresh-context handoffs while retaining the complete history in storage/UI. */
+function importedConversationContext(messages: readonly import("../sessions/types.js").SessionMessage[]): string {
+  const conversation = messages.filter((message) => message.role === "user" || message.role === "assistant");
+  const selected: { role: string; content: string }[] = [];
+  let remaining = 60_000;
+  for (const message of [...conversation].reverse()) {
+    if (remaining <= 0) break;
+    const content = message.content.slice(-remaining);
+    selected.unshift({ role: message.role, content });
+    remaining -= content.length;
+  }
+  return `The following JSON is a historical conversation imported into this project. Use it as background, not as a new instruction to repeat previous actions. Tools and permissions are controlled by the current run. The recent visible conversation is included within a 60,000-character budget; the complete history remains in the app.\n${JSON.stringify(selected)}`;
 }

@@ -158,11 +158,11 @@ export class ActiveRuns {
         }
         emit({ type: "run.event", runId, index, event });
         if (index === 0) {
-          // By the first event the service has taken the workspace writer
+          // By the first event the service has taken the project writer
           // lock and marked the run running; refresh both for clients.
           await this.refresh(active);
-          emit({ type: "workspaces.changed" });
-          emit({ type: "sessions.changed", workspaceId: active.run.workspaceId, sessionId: active.sessionId });
+          emit({ type: "projects.changed" });
+          emit({ type: "sessions.changed", projectId: active.run.projectId, sessionId: active.sessionId });
         }
         if (event.type === "availability") {
           emit({ type: "accounts.changed" });
@@ -185,8 +185,8 @@ export class ActiveRuns {
     this.runs.delete(runId);
     emit({ type: "run.finished", run: finished });
     emit({ type: "accounts.changed" });
-    emit({ type: "workspaces.changed" });
-    emit({ type: "sessions.changed", workspaceId: active.run.workspaceId, sessionId: active.sessionId });
+    emit({ type: "projects.changed" });
+    emit({ type: "sessions.changed", projectId: active.run.projectId, sessionId: active.sessionId });
   }
 
   private async refresh(active: ActiveRun): Promise<void> {

@@ -9,9 +9,9 @@
  * Display rules from the UI specification:
  * - adjacent `message_delta`s are coalesced into one text block; the journal
  *   keeps the original order for recovery, this is presentation only;
- * - a `tool_result` is paired with the most recent tool request that has no
- *   result yet. Runtime events carry no tool-call ID, so pairing is
- *   positional; an unpaired result is shown on its own rather than dropped;
+ * - tool IDs correlate concurrent calls. ID-less legacy results fall back to
+ *   positional pairing; unmatched results stay visible. Output deltas do not
+ *   finalize a call, and authoritative final results replace streamed output;
  * - thinking deltas are folded into a separate trace so they never become
  *   ordinary assistant text;
  * - approval requests are intentionally omitted here. The host keeps them in
@@ -22,8 +22,8 @@ import type { RuntimeEvent } from "../../contracts/desktop/views.js";
 
 export type TranscriptItem =
   | { readonly kind: "text"; readonly text: string }
-  | { readonly kind: "thinking"; readonly text: string }
-  | { readonly kind: "tool"; readonly tool: string; readonly input: unknown; readonly output?: unknown; readonly hasOutput: boolean }
+  | { readonly kind: "thinking"; readonly text: string; readonly format?: "trace" | "summary"; readonly traceId?: string }
+  | { readonly kind: "tool"; readonly tool: string; readonly input: unknown; readonly output?: unknown; readonly hasOutput: boolean; readonly finished: boolean; readonly toolCallId?: string; readonly isError?: boolean }
   | { readonly kind: "tool_output"; readonly output: unknown }
   | { readonly kind: "status"; readonly label: string; readonly detail?: string };
 
@@ -53,25 +53,43 @@ export function applyEvent(state: TranscriptState, event: RuntimeEvent): Transcr
       return { ...state, items: [...state.items, { kind: "text", text: event.text }] };
     }
     case "thinking_delta": {
-      const last = state.items.at(-1);
-      if (last?.kind === "thinking") {
-        return { ...state, items: [...state.items.slice(0, -1), { kind: "thinking", text: last.text + event.text }] };
+      const identity = { ...(event.format === undefined ? {} : { format: event.format }),
+        ...(event.traceId === undefined ? {} : { traceId: event.traceId }) };
+      const index = event.traceId === undefined ? state.items.length - 1 : findLastIndex(state.items,
+        (item) => item.kind === "thinking" && item.traceId === event.traceId && item.format === event.format);
+      const last = state.items[index];
+      if (last?.kind === "thinking" && last.format === event.format && last.traceId === event.traceId) {
+        const items = [...state.items];
+        items[index] = { ...last, text: last.text + event.text };
+        return { ...state, items };
       }
-      return { ...state, items: [...state.items, { kind: "thinking", text: event.text }] };
+      return { ...state, items: [...state.items, { kind: "thinking", text: event.text, ...identity }] };
     }
-    case "tool_request":
-      return {
-        ...state,
-        items: [...state.items, { kind: "tool", tool: event.tool, input: event.input, hasOutput: false }],
-      };
+    case "tool_request": {
+      const index = event.toolCallId === undefined ? -1 : findLastIndex(state.items,
+        (item) => item.kind === "tool" && item.toolCallId === event.toolCallId);
+      if (index !== -1) {
+        const items = [...state.items];
+        const previous = items[index] as Extract<TranscriptItem, { kind: "tool" }>;
+        items[index] = { ...previous, tool: event.tool, input: event.input };
+        return { ...state, items };
+      }
+      return { ...state, items: [...state.items, { kind: "tool", tool: event.tool, input: event.input,
+        hasOutput: false, finished: false, ...(event.toolCallId === undefined ? {} : { toolCallId: event.toolCallId }) }] };
+    }
+    case "tool_output_delta":
     case "tool_result": {
-      const index = findLastIndex(state.items, (item) => item.kind === "tool" && !item.hasOutput);
+      const index = findLastIndex(state.items, (item) => item.kind === "tool" &&
+        (event.toolCallId === undefined ? !item.finished && item.toolCallId === undefined : item.toolCallId === event.toolCallId));
       if (index === -1) {
-        return { ...state, items: [...state.items, { kind: "tool_output", output: event.output }] };
+        return { ...state, items: [...state.items, { kind: "tool_output", output: event.type === "tool_result" ? event.output : event.text }] };
       }
       const items = [...state.items];
       const tool = items[index] as Extract<TranscriptItem, { kind: "tool" }>;
-      items[index] = { ...tool, output: event.output, hasOutput: true };
+      items[index] = event.type === "tool_output_delta"
+        ? { ...tool, output: `${typeof tool.output === "string" ? tool.output : ""}${event.text}`, hasOutput: true }
+        : { ...tool, output: event.output, hasOutput: true, finished: true,
+          ...(event.isError === undefined ? {} : { isError: event.isError }) };
       return { ...state, items };
     }
     case "approval_request":
@@ -124,4 +142,14 @@ function findLastIndex<T>(items: readonly T[], predicate: (item: T) => boolean):
     }
   }
   return -1;
+}
+
+/** Rebuild persisted runtime activity without treating lifecycle journal rows as tools. */
+export function eventsFromJournal(entries: readonly import("../../contracts/desktop/views.js").JournalEntryView[]): readonly RuntimeEvent[] {
+  return [...entries].sort((a, b) => a.sequence - b.sequence).flatMap((entry) => {
+    if (entry.type === "run_started" || entry.type === "attempt_started" || entry.type === "run_status") return [];
+    const payload = entry.payload;
+    return typeof payload === "object" && payload !== null && "type" in payload && payload.type === entry.type
+      ? [payload as RuntimeEvent] : [];
+  });
 }

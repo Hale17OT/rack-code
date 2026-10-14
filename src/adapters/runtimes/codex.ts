@@ -8,6 +8,7 @@ import type {
   RuntimeAdapter,
   RuntimeCapabilities,
   RuntimeEvent,
+  ReasoningEffortOption,
   RuntimeModel,
   RuntimeModelInput,
   RuntimeRunInput,
@@ -62,7 +63,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const credential = await this.credentials.resolve(input.account.credential);
     const context = await this.contexts.resolve(input.account.runtimeContextId);
     const child = this.createProcess({
-      cwd: input.workspacePath ?? context.directory,
+      cwd: input.projectPath ?? context.directory,
       environment: { ...process.env, ...context.environment, ...credential.environment, CODEX_HOME: context.directory },
     });
     let timer: NodeJS.Timeout | undefined;
@@ -97,6 +98,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         const id = typeof entry.model === "string" ? entry.model : entry.id;
         if (typeof id !== "string" || id.trim() === "") continue;
         const current = models.get(id);
+        const efforts = codexReasoningEfforts(entry.supportedReasoningEfforts);
+        const defaultEffort = typeof entry.defaultReasoningEffort === "string" && efforts.some((effort) => effort.id === entry.defaultReasoningEffort)
+          ? entry.defaultReasoningEffort
+          : current?.defaultReasoningEffort;
         models.set(id, {
           id, providerId: this.providerId,
           label: typeof entry.displayName === "string" ? entry.displayName : current?.label ?? id,
@@ -104,6 +109,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
             ? { description: entry.description }
             : current?.description === undefined ? {} : { description: current.description }),
           ...(entry.isDefault === true || current?.isDefault === true ? { isDefault: true } : {}),
+          ...(efforts.length > 0 ? { reasoningEfforts: efforts } : current?.reasoningEfforts === undefined ? {} : { reasoningEfforts: current.reasoningEfforts }),
+          ...(defaultEffort === undefined ? {} : { defaultReasoningEffort: defaultEffort }),
         });
       }
       cursor = typeof response.nextCursor === "string" ? response.nextCursor : undefined;
@@ -127,7 +134,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   describePermissionMode(mode: PermissionMode): string {
     const policy = codexPermissionPolicy(mode);
-    return `Sandbox '${policy.sandbox}', approval policy '${policy.approvalPolicy}'.`;
+    return `Sandbox '${policy.sandbox}', approval policy '${policy.approvalPolicy}', reviewer '${policy.approvalsReviewer}'.`;
   }
 
   startRun(input: RuntimeRunInput): AsyncIterable<RuntimeEvent> {
@@ -163,10 +170,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       ...credential.environment,
       CODEX_HOME: context.directory,
     };
-    const childProcess = this.createProcess({ cwd: input.workspacePath, environment });
+    const childProcess = this.createProcess({ cwd: input.projectPath, environment });
     let threadId: string | undefined;
     let turnId: string | undefined;
     let assistantText = "";
+    const eventState = { thinking: new Map<string, string>(), messages: new Map<string, string>() };
 
     try {
       await childProcess.request("initialize", {
@@ -192,8 +200,16 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       const turnResponse = await childProcess.request("turn/start", {
         threadId,
         input: [{ type: "text", text: input.prompt }],
-        cwd: input.workspacePath,
+        cwd: input.projectPath,
+        // Override resumed thread settings at the turn boundary as well. The
+        // provider owns review; Rack only forwards prompts in Ask me mode.
+        approvalPolicy: codexPermissionPolicy(input.permissionMode).approvalPolicy,
+        approvalsReviewer: codexPermissionPolicy(input.permissionMode).approvalsReviewer,
         ...(input.model === undefined ? {} : { model: input.model }),
+        // `effort` overrides the thread's reasoning effort for this and later
+        // turns, so each Rack turn sends its own choice (or none, keeping the
+        // model default). Codex validates the value against the model.
+        ...(input.reasoningEffort === undefined ? {} : { effort: input.reasoningEffort }),
       });
       turnId = readString(turnResponse, ["turn", "id"]);
       if (turnId === undefined) {
@@ -214,7 +230,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         if (message.method === undefined) {
           continue;
         }
-        const events = mapCodexNotification(message.method, message.params, assistantText);
+        const events = mapCodexNotification(message.method, message.params, eventState);
         for (const event of events) {
           if (event.type === "message_delta") {
             assistantText += event.text;
@@ -248,10 +264,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private threadStartParams(input: RuntimeRunInput): Record<string, unknown> {
     const policy = codexPermissionPolicy(input.permissionMode);
     return {
-      cwd: input.workspacePath,
+      cwd: input.projectPath,
       ...(input.model === undefined ? {} : { model: input.model }),
       sandbox: policy.sandbox,
       approvalPolicy: policy.approvalPolicy,
+      approvalsReviewer: policy.approvalsReviewer,
     };
   }
 
@@ -259,10 +276,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const policy = codexPermissionPolicy(input.permissionMode);
     return {
       threadId: input.continuation?.nativeSessionId,
-      cwd: input.workspacePath,
+      cwd: input.projectPath,
       ...(input.model === undefined ? {} : { model: input.model }),
       sandbox: policy.sandbox,
       approvalPolicy: policy.approvalPolicy,
+      approvalsReviewer: policy.approvalsReviewer,
     };
   }
 
@@ -280,6 +298,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       message.method === "item/permissions/requestApproval"
     ) {
       const params = asRecord(message.params);
+      if (input.permissionMode !== "ask") {
+        // Never quietly replace automatic/native enforcement with an app
+        // prompt or an unconditional allow if the provider routes one here.
+        process.respond(message.id, codexApprovalResponse(message.method, "deny", params));
+        if (input.permissionMode !== "read_only") {
+          throw new Error(`Codex requested manual approval while '${input.permissionMode}' was selected. Its native permission settings could not resolve this action.`);
+        }
+        return;
+      }
       const decision = await input.requestApproval({
         tool: message.method,
         input: params,
@@ -295,15 +322,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 function codexPermissionPolicy(mode: PermissionMode): {
   readonly sandbox: "read-only" | "workspace-write" | "danger-full-access";
   readonly approvalPolicy: "untrusted" | "on-request" | "never";
+  readonly approvalsReviewer: "user" | "auto_review";
 } {
   switch (mode) {
     case "read_only":
-      return { sandbox: "read-only", approvalPolicy: "never" };
+      return { sandbox: "read-only", approvalPolicy: "never", approvalsReviewer: "user" };
     case "full_access":
-      return { sandbox: "danger-full-access", approvalPolicy: "never" };
-    case "ask":
+      return { sandbox: "danger-full-access", approvalPolicy: "never", approvalsReviewer: "user" };
     case "approve_for_me":
-      return { sandbox: "workspace-write", approvalPolicy: "on-request" };
+      return { sandbox: "workspace-write", approvalPolicy: "on-request", approvalsReviewer: "auto_review" };
+    case "ask":
+      return { sandbox: "workspace-write", approvalPolicy: "on-request", approvalsReviewer: "user" };
   }
 }
 
@@ -321,31 +350,69 @@ function codexApprovalResponse(
   return { decision: decision === "allow" ? "accept" : "decline" };
 }
 
-function mapCodexNotification(
-  method: string,
-  rawParams: unknown,
-  _assistantText: string,
-): RuntimeEvent[] {
+interface CodexEventState {
+  readonly thinking: Map<string, string>;
+  readonly messages: Map<string, string>;
+}
+
+/** Correlate native items and keep summaries separate from exposed trace text. */
+function mapCodexNotification(method: string, rawParams: unknown, state: CodexEventState): RuntimeEvent[] {
   const params = asRecord(rawParams);
+  const nativeId = typeof params.itemId === "string" ? params.itemId : undefined;
+  const callId = nativeId === undefined ? {} : { toolCallId: nativeId };
   switch (method) {
-    case "item/agentMessage/delta":
-      return typeof params.delta === "string" ? [{ type: "message_delta", text: params.delta }] : [];
+    case "item/agentMessage/delta": {
+      if (typeof params.delta !== "string") return [];
+      if (nativeId !== undefined) state.messages.set(nativeId, (state.messages.get(nativeId) ?? "") + params.delta);
+      return [{ type: "message_delta", text: params.delta }];
+    }
     case "item/reasoning/summaryTextDelta":
-    case "item/reasoning/textDelta":
-      return typeof params.delta === "string" ? [{ type: "thinking_delta", text: params.delta }] : [];
+    case "item/reasoning/textDelta": {
+      if (typeof params.delta !== "string") return [];
+      const format = method.includes("summary") ? "summary" : "trace";
+      const part = format === "summary" ? params.summaryIndex : params.contentIndex;
+      const traceId = nativeId === undefined ? undefined : `${nativeId}:${format}:${typeof part === "number" ? part : 0}`;
+      if (traceId !== undefined) state.thinking.set(traceId, (state.thinking.get(traceId) ?? "") + params.delta);
+      return [{ type: "thinking_delta", text: params.delta, format, ...(traceId === undefined ? {} : { traceId }) }];
+    }
     case "item/commandExecution/outputDelta":
     case "item/fileChange/outputDelta":
-      return [{ type: "tool_result", output: params.delta ?? params }];
+      return typeof params.delta === "string" ? [{ type: "tool_output_delta", text: params.delta, ...callId }] : [];
     case "item/started": {
       const item = asRecord(params.item);
       const itemType = typeof item.type === "string" ? item.type : "item";
-      if (itemType === "agentMessage" || itemType === "reasoning") {
-        return [];
-      }
-      return [{ type: "tool_request", tool: itemType, input: item }];
+      if (["agentMessage", "reasoning", "userMessage", "plan", "contextCompaction"].includes(itemType)) return [];
+      return [{ type: "tool_request", tool: itemType, input: item,
+        ...(typeof item.id === "string" ? { toolCallId: item.id } : {}) }];
     }
-    case "item/completed":
-      return [{ type: "tool_result", output: params.item ?? params }];
+    case "item/completed": {
+      const item = asRecord(params.item);
+      if (item.type === "agentMessage") {
+        if (typeof item.text !== "string") return [];
+        const previous = typeof item.id === "string" ? state.messages.get(item.id) ?? "" : "";
+        const text = item.text.startsWith(previous) ? item.text.slice(previous.length) : "";
+        return text === "" ? [] : [{ type: "message_delta", text }];
+      }
+      if (item.type === "reasoning") {
+        const events: RuntimeEvent[] = [];
+        for (const format of ["trace", "summary"] as const) {
+          const parts = format === "trace" ? item.content : item.summary;
+          for (const [index, part] of (Array.isArray(parts) ? parts : []).entries()) {
+            if (typeof part !== "string" || part === "") continue;
+            const traceId = typeof item.id === "string" ? `${item.id}:${format}:${index}` : undefined;
+            const previous = traceId === undefined ? "" : state.thinking.get(traceId) ?? "";
+            const text = part.startsWith(previous) ? part.slice(previous.length) : "";
+            if (text !== "") events.push({ type: "thinking_delta", text, format, ...(traceId === undefined ? {} : { traceId }) });
+          }
+        }
+        return events;
+      }
+      if (["userMessage", "plan", "contextCompaction"].includes(String(item.type))) return [];
+      return [{ type: "tool_result", output: item,
+        ...(typeof item.id === "string" ? { toolCallId: item.id } : {}),
+        isError: item.status === "failed" || item.status === "declined" || item.success === false
+          || (typeof item.exitCode === "number" && item.exitCode !== 0) }];
+    }
     case "thread/tokenUsage/updated": {
       const usage = asRecord(params.tokenUsage ?? params);
       const event: Extract<RuntimeEvent, { type: "usage" }> = { type: "usage" };
@@ -411,4 +478,22 @@ function readString(value: unknown, path: readonly string[]): string | undefined
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * Reads `Model.supportedReasoningEfforts` from `model/list`
+ * (`[{ reasoningEffort, description }]`). Codex types the level as a free
+ * string, so values are kept as reported; malformed or duplicate entries are
+ * skipped rather than failing the whole catalog.
+ */
+function codexReasoningEfforts(value: unknown): ReasoningEffortOption[] {
+  if (!Array.isArray(value)) return [];
+  const options: ReasoningEffortOption[] = [];
+  for (const raw of value) {
+    const entry = asRecord(raw);
+    const id = entry.reasoningEffort;
+    if (typeof id !== "string" || id.trim() === "" || options.some((option) => option.id === id)) continue;
+    options.push({ id, ...(typeof entry.description === "string" && entry.description !== "" ? { description: entry.description } : {}) });
+  }
+  return options;
 }

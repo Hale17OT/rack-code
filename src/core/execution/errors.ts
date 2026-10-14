@@ -41,5 +41,3 @@ export class NoEligibleAccountError extends ExecutionError {
     this.name = "NoEligibleAccountError";
   }
 }
-
-/** Raised when a run names a workspace that belongs to a different project. */

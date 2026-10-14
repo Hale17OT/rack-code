@@ -4,7 +4,7 @@
  * The UI specification requires clients to branch on a stable code rather
  * than parse English messages. `details` carries structured context for the
  * few errors whose recovery needs it, such as the attempt that owns a busy
- * workspace.
+ * project.
  */
 export type HostErrorCode =
   | "invalid_input"
@@ -13,8 +13,8 @@ export type HostErrorCode =
   | "provider_mismatch"
   | "account_not_found"
   | "no_eligible_account"
-  | "workspace_not_found"
-  | "workspace_busy"
+  | "project_not_found"
+  | "project_busy"
   | "session_not_found"
   | "runtime_not_found"
   | "run_not_found"

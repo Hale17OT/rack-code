@@ -26,10 +26,11 @@ export interface SurfaceDefinition {
 }
 
 export const SURFACES: readonly SurfaceDefinition[] = [
-  { id: "changes", title: "Changes", icon: "git-diff", shortcut: "D", kind: "core", description: "Code changes and diffs produced by runs." },
+  { id: "changes", title: "Changes", icon: "git-diff", shortcut: "D", kind: "core", description: "Current project changes and Git diffs." },
+  { id: "run-details", title: "Run details", icon: "list-bullets", shortcut: "R", kind: "core", description: "Run status, account, model, permissions and journal." },
   { id: "terminal", title: "Terminal", icon: "terminal-window", shortcut: "T", kind: "plugin", description: "A terminal presentation of this harness." },
   { id: "browser", title: "Browser", icon: "globe", shortcut: "B", kind: "plugin", description: "A browser shared between you and the agent." },
-  { id: "files", title: "Files", icon: "files", shortcut: "F", kind: "plugin", description: "Browse the files of the current workspace." },
+  { id: "files", title: "Files", icon: "files", shortcut: "F", kind: "plugin", description: "Browse the files of the current project." },
   { id: "timeline", title: "Timeline", icon: "clock-counter-clockwise", shortcut: "L", kind: "plugin", description: "Project history across runs and code changes." },
   { id: "retrospective", title: "Retrospective", icon: "lightbulb", shortcut: "R", kind: "plugin", description: "Post-run analysis and environment observations." },
   { id: "orchestration", title: "Orchestration", icon: "flow-arrow", shortcut: "O", kind: "plugin", description: "Multi-stage workflows across models and providers." },

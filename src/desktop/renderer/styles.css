@@ -465,8 +465,8 @@ textarea:disabled {
   overflow-y: auto;
 }
 
-/* Unified workspace tree; project records are represented by their folders. */
-.sidebar-workspaces {
+/* Unified project tree; project records are represented by their folders. */
+.sidebar-projects {
   flex: 0 1 auto;
   display: flex;
   flex-direction: column;
@@ -477,7 +477,7 @@ textarea:disabled {
   overflow-y: auto;
 }
 
-.sidebar-workspaces-unified {
+.sidebar-projects-unified {
   flex: 1 1 auto;
   max-height: none;
   border-top: 0;
@@ -2128,15 +2128,21 @@ details.data summary {
   border-radius: 8px;
 }
 
-.workspace-folder {
-  min-height: 46px;
+.project-folder {
+  min-height: 36px;
   height: auto;
 }
 
-.workspace-folder .tree-folder-toggle {
-  padding-top: 6px;
-  padding-bottom: 6px;
+.project-folder .tree-folder-toggle {
+  padding-top: 3px;
+  padding-bottom: 3px;
 }
+
+/* Reorder affordances never alter row dimensions while dragging. */
+.tree [draggable="true"] { cursor: grab; }
+.tree .dragging { opacity: 0.45; }
+.tree .drop-before { box-shadow: inset 0 2px var(--text-2); }
+.tree .drop-after { box-shadow: inset 0 -2px var(--text-2); }
 
 .tree-folder:hover {
   background: var(--overlay);
@@ -2212,7 +2218,7 @@ details.data summary {
 }
 
 .tree-item,
-.workspace-item {
+.project-item {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2243,13 +2249,13 @@ details.data summary {
 }
 
 .tree-item .icon,
-.workspace-item .icon {
+.project-item .icon {
   width: 14px;
   height: 14px;
 }
 
 .tree-item .nav-title,
-.workspace-item .nav-title {
+.project-item .nav-title {
   font-size: 12.5px;
   font-weight: 450;
 }
@@ -2637,4 +2643,336 @@ details.data summary {
   font-family: var(--font-mono);
   font-size: 15px;
   letter-spacing: 0.12em;
+}
+
+/* Local-session import keeps the app's neutral palette and dense folder UI. */
+.import-modal { width: min(780px, 100%); max-height: calc(100vh - 48px); }
+.import-modal .modal-body { min-height: 0; overflow: hidden; }
+.import-folder { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.import-columns { display: grid; grid-template-columns: minmax(180px, 0.8fr) minmax(0, 1.2fr); min-height: 180px; height: min(420px, 48vh); gap: 16px; }
+.import-list, .import-preview { overflow-y: auto; min-width: 0; }
+.import-list { border-right: 1px solid var(--border); padding-right: 12px; }
+.import-session { width: 100%; display: flex; flex-direction: column; gap: 6px; padding: 12px; margin-bottom: 4px; text-align: left; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--text); cursor: pointer; }
+.import-session:hover { background: var(--overlay); }
+.import-session.selected { background: var(--overlay); border-color: var(--border-strong); }
+.import-session-title { font-size: 12px; font-weight: 500; line-height: 1.5; overflow-wrap: anywhere; }
+.import-preview-message { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.import-preview-role { font: 10px var(--font-mono); text-transform: uppercase; color: var(--text-2); }
+.import-preview-message p { margin: 8px 0 0; white-space: pre-wrap; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.import-history-note { padding: 18px 0; font-size: 12px; line-height: 1.65; }
+.imported-tool { color: var(--text-2); font-size: 12px; }
+.imported-tool summary { cursor: pointer; }
+.imported-tool pre { overflow: auto; max-height: 300px; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 620px) {
+  .import-columns { grid-template-columns: 1fr; height: min(480px, 55vh); }
+  .import-list { border-right: 0; border-bottom: 1px solid var(--border); padding-right: 0; min-height: 110px; }
+}
+
+/* Import selection is separate from preview navigation and uses native checkboxes. */
+.import-selection { display: flex; align-items: center; justify-content: space-between; padding: 2px 0 10px; border-bottom: 1px solid var(--border); }
+.import-selection label { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
+.import-selection input, .import-session-check input { width: 15px; height: 15px; margin: 0; accent-color: var(--primary); cursor: pointer; }
+.import-session-row { display: flex; align-items: flex-start; border: 1px solid transparent; border-radius: 10px; margin-bottom: 5px; }
+.import-session-row.checked { border-color: var(--border-strong); background: var(--overlay); }
+.import-session-check { display: flex; padding: 15px 0 15px 9px; }
+.import-session-row .import-session { flex: 1; min-width: 0; margin: 0; padding-left: 10px; }
+.import-session-error { font-size: 11px; color: var(--danger, #b44a4a); }
+
+/* Activity cards give tools a clear target and measured outcome, without raw JSON in the main row. */
+.activity-card { margin: 6px 0; border: 1px solid transparent; border-radius: 8px; overflow: hidden; }
+.activity-card[open] { border-color: var(--border); background: var(--card); }
+.activity-card > summary { display: flex; align-items: center; gap: 8px; padding: 5px 8px; list-style: none; cursor: pointer; }
+.activity-card > summary::-webkit-details-marker { display: none; }
+.activity-card > summary:hover { background: var(--overlay); }
+.activity-icon { display: grid; place-items: center; width: 20px; height: 20px; flex: 0 0 20px; color: var(--text-2); }
+.activity-icon .icon { width: 15px; height: 15px; }
+.activity-heading { display: flex; align-items: baseline; gap: 8px; flex: 1; min-width: 0; }
+.activity-title { font-size: 12px; font-weight: 500; line-height: 1.5; flex-shrink: 0; }
+.activity-target { color: var(--text-2); font: 11px/1.6 var(--font-mono); white-space: nowrap; text-overflow: ellipsis; overflow: hidden; min-width: 0; }
+.activity-target::before { content: "— "; }
+.activity-meta { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; font: 10px/1.6 var(--font-mono); color: var(--text-2); }
+.activity-status { display: flex; align-items: center; gap: 4px; }
+.activity-status .icon { width: 12px; height: 12px; }
+.activity-card.failed .activity-status { color: var(--danger, #b44a4a); }
+.activity-caret { width: 12px; height: 12px; flex: 0 0 12px; margin-top: 4px; color: var(--text-3); transition: transform 120ms ease; }
+.activity-card[open] > summary .activity-caret { transform: rotate(90deg); }
+.activity-body { border-top: 1px solid var(--border); padding: 12px 14px; display: flex; flex-direction: column; gap: 14px; }
+/* Keep author display rules from exposing panels in a closed disclosure. */
+.activity-card:not([open]) > .activity-body { display: none; }
+
+/* The side diff uses selectable text and horizontal scrolling for long code. */
+.changes-content { padding: 12px; min-width: 0; }
+.run-progress { padding: 12px 0; color: var(--text-2); }
+.progress-dots { display: inline-flex; align-items: center; gap: 5px; height: 16px; }
+.progress-dots > span { width: 4px; height: 4px; border-radius: 50%; background: currentColor; animation: progress-dot 1.2s ease-in-out infinite; }
+@keyframes progress-dot { 0%, 70%, 100% { opacity: 0.35; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-3px); } }
+@media (prefers-reduced-motion: reduce) { .progress-dots > span { animation: none; opacity: 0.65; } }
+.changes-heading { display: flex; align-items: center; gap: 8px; }
+.changes-heading > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.changes-note { color: var(--text-3); font-size: 11px; line-height: 1.6; margin: 8px 0 14px; }
+.change-file { border: 1px solid var(--border); border-radius: 8px; margin: 8px 0; overflow: hidden; }
+.change-file > summary { display: flex; align-items: center; gap: 6px; padding: 10px 8px; cursor: pointer; list-style: none; }
+.change-file > summary::-webkit-details-marker { display: none; }
+.change-file[open] > summary .activity-caret { transform: rotate(90deg); }
+.change-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px var(--font-mono); }
+.change-count { font: 10px var(--font-mono); background: transparent; }
+.change-patch { margin: 0; border-top: 1px solid var(--border); overflow: auto; max-height: 65vh; font: 11px/1.7 var(--font-mono); }
+.change-patch code { display: block; min-width: max-content; }
+.change-patch code > span { display: block; padding: 0 8px; white-space: pre; }
+.change-file:not([open]) > .change-patch { display: none; }
+.activity-section-label { display: block; color: var(--text-3); font: 10px var(--font-mono); letter-spacing: 0.04em; margin-bottom: 7px; }
+.activity-code, .activity-diff { margin: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--inset); padding: 10px 12px; max-height: 320px; overflow: auto; color: var(--text-2); font: 11px/1.7 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.activity-diff { padding: 8px 0; }
+.activity-diff code > span { display: block; padding: 0 12px; }
+.diff-add { color: #3e895c; background: rgba(72, 145, 92, 0.08); }
+.diff-remove { color: #b15454; background: rgba(172, 77, 77, 0.08); }
+.diff-header { color: var(--text-3); }
+/* Thinking: lightbulb beside the trace text, no label. Spacing is half of the
+   earlier labelled panel. The bulb collapses the trace to its first line. */
+.thinking-panel { display: flex; align-items: flex-start; gap: 6px; margin: 7px 0 9px; padding-left: 6px; border-left: 2px solid var(--border-strong); }
+.thinking-toggle { flex: none; display: grid; place-items: center; width: 18px; height: 21px; padding: 0; border: 0; border-radius: 5px; background: none; color: var(--text-3); cursor: pointer; }
+.thinking-toggle:hover { color: var(--text); background: var(--overlay); }
+.thinking-toggle:focus-visible { outline: 2px solid var(--border-strong); outline-offset: 1px; }
+.thinking-toggle .icon { width: 13px; height: 13px; }
+.thinking-prose { flex: 1; min-width: 0; color: var(--text-2); font-size: 12px; line-height: 1.75; }
+.thinking-prose p:first-child { margin-top: 0; }
+.thinking-panel.collapsed .thinking-prose { max-height: 1.75em; overflow: hidden; -webkit-mask-image: linear-gradient(to right, #000 80%, transparent); }
+@media (max-width: 620px) {
+  .activity-card > summary { flex-wrap: wrap; }
+  .activity-heading { flex-basis: calc(100% - 54px); }
+  .activity-meta { margin-left: 38px; justify-content: flex-start; }
+}
+
+.repository-controls { display: grid; gap: 8px; margin-bottom: 10px; }
+.repository-controls select { width: 100%; min-width: 0; }
+.repository-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.repository-title { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; margin: 14px 0 8px; }
+.repository-changes + .repository-changes { margin-top: 18px; }
+
+/* ------------------------------------------------------ minimal scrollbars */
+
+/* Thin, trackless scrollbars that stay invisible until the pointer is over
+   the scrolling region, then show a slim rounded thumb. The 2px transparent
+   border inset keeps the visible thumb at 4px inside an 8px hit area.
+   Colors derive from --text so both palettes work without new tokens.
+   Do not set the standard `scrollbar-width`/`scrollbar-color` properties
+   anywhere: in Chromium they disable these ::-webkit-scrollbar rules. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background-clip: padding-box;
+  background-color: transparent;
+}
+
+:hover::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--text) 18%, transparent);
+}
+
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active {
+  background-color: color-mix(in srgb, var(--text) 36%, transparent);
+}
+
+/* ------------------------------------------------------ resizable panels */
+
+.sidebar,
+.workbench {
+  position: relative;
+}
+
+/* A 6px hit area straddling the panel's inner border; the visible 2px line
+   appears on hover, focus, and while dragging. */
+.resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 6;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+  -webkit-app-region: no-drag;
+}
+
+.sidebar > .resize-handle {
+  right: -3px;
+}
+
+.workbench > .resize-handle {
+  left: -3px;
+}
+
+.resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.resize-handle:hover::after,
+.resize-handle:focus-visible::after,
+.resize-handle.dragging::after {
+  background: var(--border-strong);
+}
+
+.resize-handle:focus-visible {
+  outline: none;
+}
+
+/* A collapsed panel cannot be resized; the floating peek keeps its width. */
+.left-collapsed .sidebar > .resize-handle,
+.right-collapsed .workbench > .resize-handle {
+  display: none;
+}
+
+html.resizing,
+html.resizing * {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
+/* ------------------------------------------------------ approval request */
+
+.approval-head .activity-icon {
+  flex: none;
+}
+
+.approval-target {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 160px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--inset);
+  font: 12px/1.6 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.approval-detail {
+  margin: 0;
+  max-height: 240px;
+}
+
+.approval .approval-reason {
+  font-size: 12px;
+}
+
+/* --------------------------------------------------------- markdown tables */
+
+/* The wrapper shrinks to the table and scrolls horizontally only when the
+   table is wider than the transcript column. */
+.md-table-wrap {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 12px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.md-table {
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
+.md-table th,
+.md-table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.md-table th + th,
+.md-table td + td {
+  border-left: 1px solid var(--border);
+}
+
+.md-table th {
+  background: var(--inset);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.md-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.md-table tbody tr:hover {
+  background: var(--overlay);
+}
+
+.md-table .align-center {
+  text-align: center;
+}
+
+.md-table .align-right {
+  text-align: right;
+}
+
+/* ------------------------------------------------ scrolling dropdown lists */
+
+/* The popover itself is the scroll container (height-capped in popover.ts).
+   Group headings stick to its top so the provider of the options currently
+   in view stays visible; -6px offsets the popover padding. */
+.popover .menu-group {
+  position: sticky;
+  top: -6px;
+  z-index: 1;
+  background: var(--card);
+}
+
+/* ------------------------------------------- sessions waiting on approval */
+
+/* The design has no accent color, so a blocked session is emphasized with
+   full-contrast text and a slow pulse on the hand icon. */
+.tree-item.needs-approval .nav-icon,
+.tree-count.needs-approval {
+  color: var(--text);
+  animation: approval-pulse 1.6s ease-in-out infinite;
+}
+
+.tree-item.needs-approval .nav-title {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.nav-age.approval-flag {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+@keyframes approval-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tree-item.needs-approval .nav-icon,
+  .tree-count.needs-approval {
+    animation: none;
+  }
 }

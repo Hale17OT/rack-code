@@ -12,12 +12,14 @@
  */
 import {
   empty,
+  boolean,
   object,
   oneOf,
   optional,
   text,
   type Validator,
 } from "./validation.js";
+import type { ProjectChanges, ProjectRepositories, RepositoryDiscoveryOptions } from "./views.js";
 import {
   PERMISSION_MODES,
   type AccountView,
@@ -33,7 +35,10 @@ import {
   type SessionSummaryView,
   type SessionView,
   type StartRunResult,
-  type WorkspaceView,
+  type ProjectView,
+  type SessionDiscovery,
+  type ExternalSessionSnapshot,
+  type ImportSessionResult,
 } from "./views.js";
 
 /** Opaque credential reference; the host obtains it, never the secret. */
@@ -54,13 +59,15 @@ export interface RegisterAccountParams {
 
 export interface StartRunParams {
   readonly sessionId: string;
-  readonly workspaceId: string;
+  readonly projectId: string;
   readonly providerId: string;
   readonly runtimeId: string;
   /** Omit to let the Accounts service choose the selected or fallback account. */
   readonly accountId?: string;
   readonly prompt: string;
   readonly model?: string;
+  /** A level from the selected model's `reasoningEfforts`; omit for the provider default. */
+  readonly reasoningEffort?: string;
   readonly permissionMode: PermissionMode;
 }
 
@@ -86,24 +93,34 @@ export interface HostCommandMap {
   "auth.cancel": { params: { readonly connectId: string }; result: null };
   /** Sign-ins in progress, for clients that open mid-flow. */
   "auth.active": { params: NoParams; result: readonly ConnectView[] };
-  "workspaces.list": { params: NoParams; result: readonly WorkspaceView[] };
-  "workspaces.create": {
+  "projects.list": { params: NoParams; result: readonly ProjectView[] };
+  "projects.changes": { params: { readonly projectId: string; readonly repositoryPath?: string }; result: ProjectChanges };
+  "projects.repositories": { params: { readonly projectId: string } & RepositoryDiscoveryOptions; result: ProjectRepositories };
+  "projects.create": {
     params: {
       readonly path: string;
-      readonly kind?: "shared" | "isolated";
       readonly startingRevision?: string;
     };
-    result: WorkspaceView;
+    result: ProjectView;
   };
-  /** Omit `workspaceId` to list sessions from every workspace. */
-  "sessions.list": { params: { readonly workspaceId?: string }; result: readonly SessionSummaryView[] };
+  /** Omit `projectId` to list sessions from every project. */
+  "sessions.list": { params: { readonly projectId?: string }; result: readonly SessionSummaryView[] };
   "sessions.create": {
-    params: { readonly workspaceId: string; readonly title?: string };
+    params: { readonly projectId: string; readonly title?: string };
     result: SessionView;
   };
   "sessions.get": { params: { readonly sessionId: string }; result: SessionView };
+  "sessions.discover": { params: { readonly projectId: string }; result: SessionDiscovery };
+  "sessions.previewImport": {
+    params: { readonly projectId: string; readonly sourceId: string; readonly nativeSessionId: string };
+    result: ExternalSessionSnapshot;
+  };
+  "sessions.import": {
+    params: { readonly projectId: string; readonly sourceId: string; readonly nativeSessionId: string };
+    result: ImportSessionResult;
+  };
   "runtimes.list": { params: NoParams; result: readonly RuntimeView[] };
-  "models.list": { params: { readonly workspaceId?: string }; result: ModelCatalogView };
+  "models.list": { params: { readonly projectId?: string }; result: ModelCatalogView };
   "runtimes.capabilities": {
     params: { readonly runtimeId: string; readonly accountId: string };
     result: RuntimeCapabilities;
@@ -144,26 +161,33 @@ export const COMMAND_VALIDATORS: { readonly [C in HostCommand]: Validator<Comman
   "auth.submitCode": object({ connectId: id, code: text({ maxLength: 4096 }) }),
   "auth.cancel": object({ connectId: id }),
   "auth.active": empty,
-  "workspaces.list": empty,
-  "workspaces.create": object({
+  "projects.list": empty,
+  "projects.changes": object({ projectId: id, repositoryPath: optional(text()) }),
+  "projects.repositories": object({ projectId: id, rescan: optional(boolean), deep: optional(boolean), repositoryPath: optional(text()) }),
+  "projects.create": object({
     path: text(),
-    kind: optional(oneOf(["shared", "isolated"])),
     startingRevision: optional(id),
   }),
-  "sessions.list": object({ workspaceId: optional(id) }),
-  "sessions.create": object({ workspaceId: id, title: optional(text({ maxLength: 256 })) }),
+  "sessions.list": object({ projectId: optional(id) }),
+  "sessions.create": object({ projectId: id, title: optional(text({ maxLength: 256 })) }),
   "sessions.get": object({ sessionId: id }),
+  "sessions.discover": object({ projectId: id }),
+  "sessions.previewImport": object({ projectId: id, sourceId: id, nativeSessionId: id }),
+  "sessions.import": object({ projectId: id, sourceId: id, nativeSessionId: id }),
   "runtimes.list": empty,
-  "models.list": object({ workspaceId: optional(id) }),
+  "models.list": object({ projectId: optional(id) }),
   "runtimes.capabilities": object({ runtimeId: id, accountId: id }),
   "runs.start": object({
     sessionId: id,
-    workspaceId: id,
+    projectId: id,
     providerId: id,
     runtimeId: id,
     accountId: optional(id),
     prompt: text({ maxLength: 200_000 }),
     model: optional(id),
+    // Provider-defined level names (Codex reports free-form strings), so the
+    // contract bounds the shape; the adapter checks support for the model.
+    reasoningEffort: optional(text({ maxLength: 32 })),
     permissionMode: oneOf(PERMISSION_MODES),
   }),
   "runs.list": object({ sessionId: id }),

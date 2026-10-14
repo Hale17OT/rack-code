@@ -3,22 +3,45 @@ import type { ExecutionStore } from "../../core/execution/ports.js";
 import type { AttemptId, AttemptRecord, JournalEntry, RunId, RunRecord } from "../../core/execution/types.js";
 
 interface ExecutionDocument {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 3;
   readonly runs: RunRecord[];
   readonly attempts: AttemptRecord[];
   readonly journal: JournalEntry[];
 }
 
-/** Durable execution snapshots and append-only journal for the local MVP. */
+type LegacyRun = Omit<RunRecord, "projectId"> & { projectId?: string; workspaceId?: string };
+
+/** Durable snapshots and journal; schema 3 resolves duplicate project IDs. */
 export class JsonExecutionStore implements ExecutionStore {
   private readonly document: JsonFileDocument<ExecutionDocument>;
 
-  constructor(filePath: string) {
+  constructor(filePath: string, resolveProjectId: (id: string) => Promise<string> = async (id) => id) {
     this.document = new JsonFileDocument<ExecutionDocument>(filePath, {
-      schemaVersion: 1,
+      schemaVersion: 3,
       runs: [],
       attempts: [],
       journal: [],
+    }, async (stored) => {
+      const current = stored as ExecutionDocument;
+      const version = (stored as { schemaVersion: number }).schemaVersion;
+      if (version === 3) return current;
+      if (version !== 1 && version !== 2) {
+        throw new Error("Unsupported execution schema version.");
+      }
+      return {
+        ...current,
+        schemaVersion: 3,
+        // Preserve the journal, attempt IDs and outcomes exactly. Only the
+        // run's folder reference changes to the canonical project name.
+        runs: await Promise.all(current.runs.map(async (run) => {
+          const { workspaceId, ...rest } = run as LegacyRun;
+          const projectId = workspaceId ?? rest.projectId;
+          if (projectId === undefined || projectId.trim() === "") {
+            throw new Error(`Run '${run.id}' has no saved project folder reference.`);
+          }
+          return { ...rest, projectId: await resolveProjectId(projectId) };
+        })),
+      };
     });
   }
 

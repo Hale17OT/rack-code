@@ -10,8 +10,12 @@ import { ClaudeRuntimeAdapter } from "../adapters/runtimes/claude.js";
 import { CodexRuntimeAdapter } from "../adapters/runtimes/codex.js";
 import { JsonAccountStore } from "../adapters/storage/json-account-store.js";
 import { JsonExecutionStore } from "../adapters/storage/json-execution-store.js";
-import { JsonWorkspaceStore } from "../adapters/storage/json-workspace-store.js";
+import { JsonProjectStore } from "../adapters/storage/json-project-store.js";
 import { JsonSessionStore } from "../adapters/storage/json-session-store.js";
+import { CodexLocalSessionSource } from "../adapters/session-imports/codex.js";
+import { ClaudeLocalSessionSource } from "../adapters/session-imports/claude.js";
+import { SessionImportsService } from "../core/session-imports/service.js";
+import type { LocalSessionSource } from "../core/session-imports/ports.js";
 import type {
   CredentialResolver,
   RuntimeContextResolver,
@@ -21,13 +25,15 @@ import type { AccountConnector } from "../core/connections/ports.js";
 import { ConnectionsService } from "../core/connections/service.js";
 import { ExecutionService } from "../core/execution/service.js";
 import { RuntimeRegistry } from "../core/execution/runtime-registry.js";
-import { WorkspacesService } from "../core/workspaces/service.js";
+import { ProjectsService } from "../core/projects/service.js";
+import { GitProjectChangesReader } from "../adapters/projects/git-changes.js";
 import { SessionsService } from "../core/sessions/service.js";
 
 export interface Application {
   readonly accounts: AccountsService;
-  readonly workspaces: WorkspacesService;
+  readonly projects: ProjectsService;
   readonly sessions: SessionsService;
+  readonly sessionImports: SessionImportsService;
   readonly execution: ExecutionService;
   readonly connections: ConnectionsService;
   readonly runtimes: RuntimeRegistry;
@@ -45,6 +51,8 @@ export interface CreateApplicationOptions {
   readonly runtimeContexts?: RuntimeContextResolver;
   /** Provider sign-in connectors; defaults to Codex and Claude. */
   readonly connectors?: readonly AccountConnector[];
+  /** Read-only local-history sources; tests and alternate hosts may supply their own. */
+  readonly sessionSources?: readonly LocalSessionSource[];
 }
 
 /**
@@ -65,9 +73,16 @@ export function createApplication(options: CreateApplicationOptions = {}): Appli
   );
 
   const accounts = new AccountsService(new JsonAccountStore(join(dataDirectory, "accounts.json")));
-  const workspaces = new WorkspacesService(new JsonWorkspaceStore(join(dataDirectory, "workspaces.json"), join(dataDirectory, "projects.json")));
-  const sessions = new SessionsService(new JsonSessionStore(join(dataDirectory, "sessions.json")));
-  const executionStore = new JsonExecutionStore(join(dataDirectory, "execution.json"));
+  const projects = new ProjectsService(new JsonProjectStore(join(dataDirectory, "projects.json"), join(dataDirectory, "workspaces.json")), {
+    changes: new GitProjectChangesReader(),
+  });
+  // Resolve migration aliases through the owning capability before exposing
+  // saved sessions or runs. Both histories then group under one folder row.
+  const resolveProjectId = async (id: string): Promise<string> => (await projects.getProject(id)).id;
+  const sessions = new SessionsService(new JsonSessionStore(join(dataDirectory, "sessions.json"), resolveProjectId));
+  const executionStore = new JsonExecutionStore(join(dataDirectory, "execution.json"), resolveProjectId);
+  const sessionImports = new SessionImportsService(projects, sessions,
+    options.sessionSources ?? [new CodexLocalSessionSource(), new ClaudeLocalSessionSource()]);
   const runtimes = new RuntimeRegistry();
   runtimes.register(new CodexRuntimeAdapter(credentials, runtimeContexts));
   runtimes.register(new ClaudeRuntimeAdapter(credentials, runtimeContexts));
@@ -75,7 +90,7 @@ export function createApplication(options: CreateApplicationOptions = {}): Appli
     executionStore,
     accounts,
     sessions,
-    workspaces,
+    projects,
     runtimes,
   );
 
@@ -88,8 +103,9 @@ export function createApplication(options: CreateApplicationOptions = {}): Appli
   return {
     accounts,
     connections,
-    workspaces,
+    projects,
     sessions,
+    sessionImports,
     execution,
     runtimes,
     credentials,

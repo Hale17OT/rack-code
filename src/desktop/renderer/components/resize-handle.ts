@@ -1,0 +1,109 @@
+/**
+ * Draggable vertical splitter for resizing a side panel.
+ *
+ * The handle is placed on one edge of a panel and reports a new panel width
+ * through callbacks; it owns no layout state itself. The caller decides how
+ * the width is applied (the shell sets a CSS custom property) and when it is
+ * persisted.
+ *
+ * Interaction:
+ * - pointer drag resizes live through `onResize` and calls `onCommit` once
+ *   on release, so storage is written once per drag rather than per frame;
+ * - double-click restores `defaultWidth`;
+ * - keyboard (the handle is a focusable `separator`): Left/Right arrows step
+ *   by 16 px (64 px with Shift), Home/End jump to the minimum/maximum.
+ *
+ * Widths are always clamped to `[min, max()]`. `max` is a function because
+ * the allowed maximum depends on the window size and the other panel.
+ */
+import { h } from "../dom.js";
+
+export interface ResizeHandleOptions {
+  /** Accessible name, for example "Resize sidebar". */
+  readonly label: string;
+  /**
+   * Which edge of the panel the handle sits on. A handle on the panel's
+   * right edge grows the panel when dragged right; on the left edge, when
+   * dragged left.
+   */
+  readonly edge: "left" | "right";
+  readonly min: number;
+  readonly max: () => number;
+  readonly defaultWidth: number;
+  /** Current panel width in CSS pixels. */
+  readonly width: () => number;
+  /** Applies a clamped width during interaction. */
+  readonly onResize: (width: number) => void;
+  /** Persists the final width after a drag, key press, or reset. */
+  readonly onCommit: (width: number) => void;
+}
+
+const KEY_STEP = 16;
+const KEY_STEP_LARGE = 64;
+
+export function createResizeHandle(options: ResizeHandleOptions): HTMLElement {
+  const handle = h("div", { class: "resize-handle", role: "separator", title: `${options.label} (double-click to reset)`, aria: { label: options.label, orientation: "vertical" } });
+  handle.tabIndex = 0;
+
+  const clamp = (width: number) => Math.round(Math.min(Math.max(width, options.min), Math.max(options.min, options.max())));
+  const apply = (width: number, commit: boolean) => {
+    const clamped = clamp(width);
+    options.onResize(clamped);
+    syncAria(clamped);
+    if (commit) options.onCommit(clamped);
+  };
+  const syncAria = (width: number) => {
+    handle.setAttribute("aria-valuemin", String(options.min));
+    handle.setAttribute("aria-valuemax", String(Math.max(options.min, Math.round(options.max()))));
+    handle.setAttribute("aria-valuenow", String(width));
+  };
+  // Grows the panel for movement away from the main column.
+  const direction = options.edge === "right" ? 1 : -1;
+
+  handle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = options.width();
+    let latest = startWidth;
+    handle.setPointerCapture(event.pointerId);
+    handle.classList.add("dragging");
+    // Keeps the resize cursor and prevents text selection while the pointer
+    // is outside the handle during a fast drag.
+    document.documentElement.classList.add("resizing");
+
+    const move = (moveEvent: PointerEvent) => {
+      latest = clamp(startWidth + (moveEvent.clientX - startX) * direction);
+      apply(latest, false);
+    };
+    const end = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", end);
+      handle.removeEventListener("pointercancel", end);
+      handle.classList.remove("dragging");
+      document.documentElement.classList.remove("resizing");
+      apply(latest, true);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+  });
+
+  handle.addEventListener("dblclick", () => apply(options.defaultWidth, true));
+
+  handle.addEventListener("keydown", (event) => {
+    const step = event.shiftKey ? KEY_STEP_LARGE : KEY_STEP;
+    const current = options.width();
+    let next: number | undefined;
+    if (event.key === "ArrowRight") next = current + step * direction;
+    else if (event.key === "ArrowLeft") next = current - step * direction;
+    else if (event.key === "Home") next = options.min;
+    else if (event.key === "End") next = options.max();
+    if (next === undefined) return;
+    event.preventDefault();
+    apply(next, true);
+  });
+
+  syncAria(clamp(options.width()));
+  return handle;
+}

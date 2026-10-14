@@ -1,5 +1,84 @@
 # Change log
 
+## 2026-10-14 - Reasoning effort, scrolling dropdowns, background approval badges
+
+- Added reasoning effort end to end: `RuntimeModel.reasoningEfforts`/`defaultReasoningEffort` in catalogs, `reasoningEffort` on `runs.start`, `RunRecord`, and `RuntimeRunInput`. Codex reads `supportedReasoningEfforts`/`defaultReasoningEffort` from `model/list` and sends `effort` on `turn/start`. Claude reads `supportedEffortLevels` and sets the SDK `effort` option, rejecting unknown levels visibly. The composer shows an effort pill limited to the selected model's reported levels; Run details shows the run's effort.
+- Popovers are height-capped at 320 px and scroll, with sticky provider group headings, so the model list is a short scrolling box.
+- Sessions waiting for an approval show a pulsing hand icon and "Needs approval" in the sidebar (and on collapsed projects), including sessions other than the open one.
+- Validation performed: type checks, all 93 tests (new tests for Codex and Claude effort catalogs and pass-through, unsupported Claude levels, and execution recording), and the desktop bundle passed. Codex 0.162.1's generated app-server schema and the installed Claude Agent SDK types were checked for the effort fields. An Electron run of the built renderer against a stub host confirmed the background session badge, the effort pill defaulting to the model default, the 320 px scrolling model list, the effort menu, and the focused approval card (screenshots reviewed). Not performed: a live provider run with a chosen effort, and a packaged build.
+
+## 2026-10-14 - Resizable panels, minimal scrollbars, focused approvals, tables
+
+- Both side panels are resizable by dragging their inner edge (`components/resize-handle.ts`), with keyboard arrows and double-click reset. Widths persist per device (`layout.widths`), keep the main column at least 420 px, and re-fit when the window shrinks or a panel is toggled.
+- Scrollbars are minimal app-wide: trackless 4 px thumbs that appear only while hovering the scrolling region.
+- Approval overlays show only what is being approved (action, target, diff or arguments, reason), described through the same `presentTool` mapping as activity cards. Account, model, run/attempt, and request ID were removed from the overlay; `ui-spec.md` updated accordingly.
+- Thinking traces drop the "Thinking trace"/"Reasoning summary" label and caret; a lightbulb beside the text collapses it to one line. Vertical margins and left padding are halved. The summary/trace distinction moved to the button's accessible name and tooltip.
+- Markdown supports GitHub-style pipe tables: alignment, escaped pipes, inline formatting in cells, ragged rows, and horizontal scrolling for wide tables. Incomplete tables stay paragraphs while streaming.
+- Validation performed: type checks, all 90 tests (3 new table parser tests), and the desktop bundle passed. An Electron 44 run of the built renderer against a stub host confirmed a pointer drag resizes the sidebar to 360 px with saved width and ARIA value, and screenshots confirmed table rendering in light and dark themes. Not performed: visual checks of the approval overlay and thinking panel with live provider events, scrollbar hover appearance, and a packaged build.
+
+## 2026-10-14 - Native automatic permissions and active-run progress
+
+- Replaced Approve for me’s Ask me placeholder with provider-owned review: Codex workspace-write/on-request with `approvalsReviewer: "auto_review"`, and Claude SDK `permissionMode: "auto"` without the Rack interactive approval callback. Apply explicit settings to new/resumed threads and Codex turn starts. Provider denials remain denials; unexpected Codex manual prompts fail visibly instead of silently asking or granting access.
+- Preserve approved Claude tool input in native responses and explicitly deny mutation callbacks in planning/read-only mode. Updated permission disclosures and documentation.
+- Keep the permission picker bound to the actual active run mode and disabled until it ends, preventing misleading mid-run changes.
+- Hide response timestamp footers during queued/running work and show animated three dots until terminal status. Keep animation phase through streaming redraws and honor reduced motion.
+- Validation performed: type checks, all 83 tests, desktop bundle and whitespace checks passed. Tests cover all native permission mappings, resumed runs, read-only denial, approved input preservation, and prevention of interactive fallback from auto review. The installed Codex 0.162.1 generated schema and an isolated ephemeral thread-start smoke check confirmed native `auto_review` support without starting a model turn. Browser fixture checks confirmed three dots and no timestamp before/during streaming, disabled permission picker while active, and timestamp/picker restoration after completion. No authenticated provider model run or packaged Electron check performed.
+
+## 2026-10-14 - Quiet response footers, streaming, and side diffs
+
+- Reduced response footers to date/time. Moved account/model/permission, status, recovery and journal diagnostics into a right-panel Run details surface with a run picker; Stop remains in the composer.
+- Preserved Claude readable content from initial streamed blocks and deduplicated final messages. Added checks that thinking and responses reach the live view before completion.
+- Replaced the Changes placeholder with a read-only project Git diff: staged/unstaged changes against HEAD plus bounded new text files, with binary/large-file notices, per-file dropdowns and highlighted additions/deletions. Poll while visible, serialize reads and discard replies for a different selected project. This is current project state, including pre-existing edits, rather than per-run attribution.
+- Validation performed: type checks, all 80 tests, desktop bundle and diff whitespace checks passed. Git fixtures covered index preservation, staged/unstaged edits, new/binary files, unborn repositories, subfolder scope and non-Git folders. Browser fixture checks confirmed streaming before completion, timestamp-only footers, highlighted side diffs, collapsed tool bodies, and Allow without cancellation; reviewed a screenshot. No live provider execution or packaged Electron check performed.
+
+## 2026-10-14 - Rearrange sidebar folders and sessions
+
+- Added sibling-scoped drag/drop ordering and Alt+Up/Down keyboard moves with local preference persistence, drop indicators, stale-ID cleanup, and newly added row handling. Project identity and session associations remain owned by the host.
+- Reduced folder-row and tool-dropdown vertical padding.
+- Validation: type checks, all 75 tests (including saved-order reconciliation and sibling moves), desktop bundling, and diff whitespace checks passed. Tests/build required an elevated rerun because the sandbox blocked the tsx IPC socket. No visual drag/drop interaction test performed.
+
+## 2026-10-14 - Collapse command activity into status dropdowns
+
+- Show tool activity as compact, initially collapsed rows with live status and a command/target preview. Reveal detailed commands, output and diffs only when expanded; preserve the existing expansion memory during streaming.
+- Explicitly hide closed activity bodies and reserve the boxed panel appearance for expanded rows.
+- Validation performed: type checks, all 73 existing tests, and desktop bundling passed. Visual browser validation and live provider execution were not performed.
+
+## 2026-10-14 - Keep approval responses from stopping execution
+
+- Set Allow and Deny to ordinary buttons inside the composer form. Previously, answering an approval also submitted the form and triggered cancellation of the active run.
+- Validation performed: type checks, all 73 existing tests, and the desktop bundle passed. Live provider execution and browser click validation were not performed.
+
+## 2026-10-14 - Batch session import and readable runtime activity
+
+- Added import checkboxes, Select all for not-yet-imported sessions, selection counts, independent previews, and batch import with preserved successes and retryable failed selections.
+- Simplified the composer permission menu to Ask me, Approve for me, Full access, and Read only, without descriptions. Runtime enforcement and diagnostic mappings are unchanged.
+- Display provider-exposed thinking as open prose, with summaries labelled separately. Retain thinking/tool activity at run completion and reconstruct saved activity from journals. Enable Claude partial messages and avoid duplicating final streamed content.
+- Added formatted tool cards for commands, file targets, diffs and output, with outcomes, exit codes and durations. Correlate parallel tools by call ID; streamed output does not imply completion. Retain readable thinking and paired Claude tools during import.
+- Validation performed: type checks, 73 tests including Select all, partial batch failure, journal restoration, streaming trace deduplication, tool identity/output correlation and formatting, headless build, desktop bundle, Markdown links/fences, and diff checks. No live provider execution or visual browser validation was performed; computer use reported no available browser in this session.
+
+## 2026-10-14 - Import local provider sessions into projects
+
+- Added project-scoped Codex app-server and Claude SDK history sources, partial discovery failures, and preview/import host commands. Imported native IDs are provenance, not assumed resume handles. Concurrent/repeated imports reuse a session; source folder and identity are checked before saving a complete snapshot.
+- Added the project-row import action, preview dialog, imported conversation/tool history, and fresh-context continuation. The first run receives recent visible conversation as background while preserving the real user prompt, selected permissions/account, and external session.
+- Updated architecture, MVP, desktop, and UI documentation and added `session-import.md`.
+- Validation performed: type checks, 62 tests covering parsing/pagination/timeouts, folder scope, idempotency, partial failure, durable host import/reload, and continuation; headless build, desktop bundle, and Markdown/diff checks. Inspected installed Codex-generated schemas and Claude SDK types. A local Claude helper check returned no matching sessions in the tested folder. Codex initialization against its original store exited in this sandbox; copied stores returned no discoverable sessions, so native live-history import remains unverified.
+- Not performed: live model execution, imports into the user's real Rack data, or visual UI verification. The browser CLI could not write its socket directory, and computer use reported no available browser. No screenshot-based validation is claimed.
+
+## 2026-10-14 - Consolidate duplicate folder projects
+
+- Found two saved project IDs pointing at the same folder. Upgraded projects to schema 4 with one canonical project per normalized path and persistent aliases for former duplicate IDs. Sessions and execution upgrade to schema 3 and resolve those aliases before returning saved history to the UI. Conflicting active writers stop migration rather than silently losing ownership.
+- Repeated or concurrent folder additions reuse the existing project. Serialized project creation and writer mutations prevent competing requests from creating another identity or acquiring two writer locks.
+- Validation performed: 53 tests, type checks, headless build, desktop bundle, local Markdown links/fences, and `git diff --check`. Verified through the host API against a temporary copy of the user's saved metadata: 2 projects became 1 while preserving all 3 sessions, 6 runs, 93 journal entries, attempts, outcomes, and native continuations. The original app data was not edited directly.
+- Not performed: visual validation or restarting the live Electron app. The running host caches its loaded data; a full app restart with the rebuilt bundle applies the upgrade.
+
+## 2026-10-14 - Use one project identity for the selected folder
+
+- Replaced workspace-named services, records, host commands/events, session/run references, model discovery inputs, and renderer state with the single project concept. The sidebar, folder picker, transcript, and error messages now consistently say Project. Removed shared/isolated kind from the project model; future isolated execution directories remain associated with a project.
+- Added automatic upgrades to projects schema 3 and sessions/execution schema 2. Preserved saved folder IDs, session messages, native continuations, attempts, journal entries, run outcomes, revisions, and writer ownership. Imported all folders from older project/workspace documents before new saves, including partial imports. Retained the legacy workspace file and sidebar expansion preferences.
+- Reject a run whose project differs from its session before recording work or calling a runtime. Updated the architecture, MVP, desktop, and UI documentation to match the new contracts.
+- Validation performed: Node and renderer type checks, headless TypeScript build, 48 tests (including migration/reload, partial import, corrupt legacy data, canonical host identity, and mismatched-project rejection), desktop bundle, local Markdown links/fences, and `git diff --check`. Used `node --import tsx` for the test runner and desktop build because the tsx CLI's IPC socket is restricted in this session.
+- Not performed: live provider execution or visual Electron validation. The earlier Electron launches in this session aborted during macOS application initialization.
+
 ## 2026-10-13 - Unify workspace navigation and remove setup text fields
 
 - Replaced the separate project tree and workspace list with one workspace folder tree. Sessions nest beneath their workspace, and the workspace plus button creates a session immediately with a generated title.

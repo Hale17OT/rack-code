@@ -4,6 +4,7 @@ import { InvalidSessionError, SessionNotFoundError } from "./errors.js";
 import type { SessionStore } from "./ports.js";
 import type {
   CreateSessionInput,
+  SessionImportSnapshot,
   NativeContinuationReference,
   SessionId,
   SessionMessage,
@@ -29,13 +30,13 @@ export class SessionsService {
   }
 
   async create(input: CreateSessionInput): Promise<SessionRecord> {
-    if (input.workspaceId.trim() === "") {
-      throw new InvalidSessionError("Workspace ID is required.");
+    if (input.projectId.trim() === "") {
+      throw new InvalidSessionError("Project ID is required.");
     }
     const timestamp = this.now().toISOString();
     const session: SessionRecord = {
       id: input.id ?? this.createId(),
-      workspaceId: input.workspaceId,
+      projectId: input.projectId,
       messages: [],
       continuations: [],
       createdAt: timestamp,
@@ -54,14 +55,36 @@ export class SessionsService {
     return session;
   }
 
+  /** Saves a complete import in one store mutation, without fabricated runs. */
+  async importSnapshot(projectId: string, snapshot: SessionImportSnapshot): Promise<SessionRecord> {
+    if (projectId.trim() === "") throw new InvalidSessionError("Project ID is required.");
+    const importedAt = this.now().toISOString();
+    const session: SessionRecord = {
+      id: this.createId(), projectId, title: snapshot.session.title,
+      createdAt: snapshot.session.createdAt, updatedAt: snapshot.session.updatedAt,
+      messages: snapshot.messages.filter((message) => message.content.trim() !== "").map((message) => ({
+        id: this.createId(), role: message.role, content: message.content,
+        createdAt: message.createdAt ?? snapshot.session.createdAt,
+        metadata: { imported: "true", ...(message.nativeMessageId === undefined ? {} : { nativeMessageId: message.nativeMessageId }),
+          ...(message.presentation === undefined ? {} : { presentation: message.presentation }),
+          ...(message.thinkingFormat === undefined ? {} : { thinkingFormat: message.thinkingFormat }) },
+      })),
+      continuations: [],
+      importSource: { sourceId: snapshot.session.sourceId, providerName: snapshot.session.providerName,
+        nativeSessionId: snapshot.session.nativeSessionId, importedAt },
+    };
+    await this.store.save(session);
+    return session;
+  }
+
   /**
-   * Lists sessions, optionally restricted to one workspace, most recently
+   * Lists sessions, optionally restricted to one project, most recently
    * updated first so navigators show active conversations at the top.
    */
-  async list(workspaceId?: string): Promise<readonly SessionRecord[]> {
+  async list(projectId?: string): Promise<readonly SessionRecord[]> {
     const sessions = await this.store.list();
     return sessions
-      .filter((session) => workspaceId === undefined || session.workspaceId === workspaceId)
+      .filter((session) => projectId === undefined || session.projectId === projectId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 

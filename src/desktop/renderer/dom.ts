@@ -11,6 +11,7 @@ type Child = Node | string | number | false | null | undefined;
 export interface Props {
   readonly class?: string | false | undefined;
   readonly title?: string;
+  readonly role?: string;
   readonly type?: string;
   readonly value?: string;
   readonly placeholder?: string;
@@ -39,6 +40,7 @@ export function h<K extends keyof HTMLElementTagNameMap>(
   const element = document.createElement(tag);
   if (props.class) element.className = props.class;
   if (props.title !== undefined) element.title = props.title;
+  if (props.role !== undefined) element.setAttribute("role", props.role);
   if (props.id !== undefined) element.id = props.id;
   if (props.type !== undefined) element.setAttribute("type", props.type);
   if (props.name !== undefined) element.setAttribute("name", props.name);

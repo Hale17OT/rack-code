@@ -21,9 +21,11 @@ import type {
   RuntimeEvent,
   RuntimeModel,
 } from "../../core/execution/types.js";
-import type { WorkspaceRecord } from "../../core/workspaces/types.js";
+import type { ProjectRecord } from "../../core/projects/types.js";
+export type { ProjectChanges, ProjectRepositories, RepositoryDiscoveryOptions } from "../../core/projects/types.js";
 import type { ConnectView } from "../../core/connections/types.js";
 import type { SessionMessage, SessionRecord } from "../../core/sessions/types.js";
+export type { SessionDiscovery, ExternalSessionSnapshot, ImportSessionResult, DiscoveredSession } from "../../core/session-imports/types.js";
 
 export type {
   AccountAvailability,
@@ -58,12 +60,12 @@ export interface AccountView {
   readonly activeAttempts: number;
 }
 
-export type WorkspaceView = WorkspaceRecord;
+export type ProjectView = ProjectRecord;
 
 /** Navigator row for a session; messages are loaded separately. */
 export interface SessionSummaryView {
   readonly id: string;
-  readonly workspaceId: string;
+  readonly projectId: string;
   readonly title?: string;
   readonly messageCount: number;
   readonly createdAt: string;

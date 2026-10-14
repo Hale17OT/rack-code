@@ -33,10 +33,10 @@ export type HostEvent =
   | { readonly type: "auth.updated"; readonly connect: ConnectView }
   /** Account records changed (registration, selection, availability, usage). */
   | { readonly type: "accounts.changed" }
-  /** Workspace records changed, for example a new folder or writer lock. */
-  | { readonly type: "workspaces.changed" }
-  /** A workspace's sessions changed (new session, new message). */
-  | { readonly type: "sessions.changed"; readonly workspaceId: string; readonly sessionId: string }
+  /** Project records changed, for example a new folder or writer lock. */
+  | { readonly type: "projects.changed" }
+  /** A project's sessions changed (new session, new message). */
+  | { readonly type: "sessions.changed"; readonly projectId: string; readonly sessionId: string }
   /**
    * Connection state of the execution host as seen by Electron main. Emitted
    * by main rather than the host, because a crashed host cannot report itself.

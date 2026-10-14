@@ -10,11 +10,14 @@ import { dirname } from "node:path";
  */
 export class JsonFileDocument<T> {
   private loaded: T | undefined;
+  private loading: Promise<T> | undefined;
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly filePath: string,
     private readonly initialValue: T,
+    /** Domain-owned schema normalization, persisted before callers see data. */
+    private readonly migrate?: (stored: unknown, missing: boolean) => T | Promise<T>,
   ) {}
 
   async read(): Promise<T> {
@@ -22,16 +25,35 @@ export class JsonFileDocument<T> {
       return structuredClone(this.loaded);
     }
 
+    // Share first-load migration across parallel host queries. Otherwise one
+    // read can observe an older schema while another is already saving it.
+    this.loading ??= this.load();
+    try {
+      return structuredClone(await this.loading);
+    } catch (error) {
+      this.loading = undefined;
+      throw error;
+    }
+  }
+
+  private async load(): Promise<T> {
+    let stored: T;
+    let missing = false;
     try {
       const content = await readFile(this.filePath, "utf8");
-      this.loaded = JSON.parse(content) as T;
+      stored = JSON.parse(content) as T;
     } catch (error) {
       if (!isMissingFile(error)) {
         throw error;
       }
-      this.loaded = structuredClone(this.initialValue);
-      await this.write(this.loaded);
+      stored = structuredClone(this.initialValue);
+      missing = true;
     }
+    const migrated = this.migrate === undefined ? stored : await this.migrate(stored, missing);
+    if (missing || JSON.stringify(stored) !== JSON.stringify(migrated)) {
+      await this.write(migrated);
+    }
+    this.loaded = migrated;
     return structuredClone(this.loaded);
   }
 

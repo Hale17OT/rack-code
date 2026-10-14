@@ -1,5 +1,6 @@
 import {
   query,
+  type EffortLevel,
   type Options,
   type PermissionResult,
   type SDKUserMessage,
@@ -56,7 +57,7 @@ export class ClaudeRuntimeAdapter implements RuntimeAdapter {
       discovery = this.createQuery({
         prompt: prompts,
         options: {
-          cwd: input.workspacePath ?? context.directory,
+          cwd: input.projectPath ?? context.directory,
           env: {
             ...stringEnvironment(process.env, new Set(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"])),
             ...context.environment, ...credential.environment, CLAUDE_CONFIG_DIR: context.directory,
@@ -68,9 +69,16 @@ export class ClaudeRuntimeAdapter implements RuntimeAdapter {
         timer = setTimeout(() => reject(new Error("Claude model discovery timed out.")), 15_000);
       });
       const entries = await Promise.race([discovery.supportedModels(), timeout]);
-      return entries.filter((entry) => entry.value.trim() !== "").map((entry) => ({
-        id: entry.value, label: entry.displayName, description: entry.description, providerId: this.providerId,
-      }));
+      return entries.filter((entry) => entry.value.trim() !== "").map((entry) => {
+        // Only models that declare effort support get selectable levels. The
+        // SDK reports no per-model default, so the picker offers "Default"
+        // (omit the option) alongside the explicit levels.
+        const levels = entry.supportsEffort === false ? [] : (entry.supportedEffortLevels ?? []);
+        return {
+          id: entry.value, label: entry.displayName, description: entry.description, providerId: this.providerId,
+          ...(levels.length > 0 ? { reasoningEfforts: levels.map((level) => ({ id: level })) } : {}),
+        };
+      });
     } finally {
       clearTimeout(timer);
       prompts.complete();
@@ -94,6 +102,9 @@ export class ClaudeRuntimeAdapter implements RuntimeAdapter {
     const permission = claudePermission(mode);
     if (permission.bypass) {
       return `SDK permission mode '${permission.mode}' with dangerous-skip allowed; no approval prompts.`;
+    }
+    if (permission.mode === "auto") {
+      return "SDK permission mode 'auto'; Claude's native classifier approves or denies actions, without Rack approval prompts.";
     }
     return permission.approvals
       ? `SDK permission mode '${permission.mode}'; tool use is routed through the app approval prompt.`
@@ -140,6 +151,7 @@ export class ClaudeRuntimeAdapter implements RuntimeAdapter {
     }
 
     let seenSessionId: string | undefined;
+    const eventState: ClaudeEventState = { messageId: "", nextMessage: 0, streamed: new Map(), tools: new Map() };
     let activeQuery: ReturnType<typeof query> | undefined;
     try {
       const options = this.options(input, environment, sdkAbort);
@@ -152,7 +164,7 @@ export class ClaudeRuntimeAdapter implements RuntimeAdapter {
           seenSessionId = sessionId;
           yield { type: "native_session", nativeSessionId: sessionId };
         }
-        yield* mapClaudeMessage(message);
+        yield* mapClaudeMessage(message, eventState);
         if (input.signal.aborted) {
           yield { type: "interrupted" };
           break;
@@ -181,11 +193,13 @@ export class ClaudeRuntimeAdapter implements RuntimeAdapter {
   ): Options {
     const permission = claudePermission(input.permissionMode);
     const options: Options = {
-      cwd: input.workspacePath,
+      cwd: input.projectPath,
       env: environment,
       abortController,
       permissionMode: permission.mode,
+      includePartialMessages: true,
       ...(input.model === undefined ? {} : { model: input.model }),
+      ...(input.reasoningEffort === undefined ? {} : { effort: claudeEffort(input.reasoningEffort) }),
       ...(input.continuation === undefined ? {} : { resume: input.continuation.nativeSessionId }),
       ...(permission.bypass ? { allowDangerouslySkipPermissions: true } : {}),
     };
@@ -203,16 +217,20 @@ export class ClaudeRuntimeAdapter implements RuntimeAdapter {
           input: toolInput,
         });
         return decision === "allow"
-          ? { behavior: "allow" }
+          ? { behavior: "allow", updatedInput: toolInput }
           : { behavior: "deny", message: "The user denied this action." };
       };
+    } else if (input.permissionMode === "read_only") {
+      // Plan mode forwards attempted mutations to canUseTool. Deny them at
+      // that native boundary; read tools permitted by plan mode still run.
+      options.canUseTool = async () => ({ behavior: "deny", message: "Read only mode does not permit this action." });
     }
     return options;
   }
 }
 
 function claudePermission(mode: PermissionMode): {
-  readonly mode: "plan" | "default" | "bypassPermissions";
+  readonly mode: "plan" | "default" | "bypassPermissions" | "auto";
   readonly approvals: boolean;
   readonly bypass: boolean;
 } {
@@ -222,49 +240,97 @@ function claudePermission(mode: PermissionMode): {
     case "full_access":
       return { mode: "bypassPermissions", approvals: false, bypass: true };
     case "ask":
-    case "approve_for_me":
       return { mode: "default", approvals: true, bypass: false };
+    case "approve_for_me":
+      // Omit canUseTool: native auto review owns decisions, and an action
+      // requiring manual escalation must not reopen Rack's Ask me dialog.
+      return { mode: "auto", approvals: false, bypass: false };
   }
 }
 
-function mapClaudeMessage(message: unknown): RuntimeEvent[] {
+interface ClaudeEventState {
+  messageId: string;
+  nextMessage: number;
+  readonly streamed: Map<string, string>;
+  readonly tools: Map<number, { id: string; name: string; json: string }>;
+}
+
+/** SDK streaming blocks and final messages describe the same content once. */
+function mapClaudeMessage(message: unknown, state: ClaudeEventState): RuntimeEvent[] {
   const type = stringField(message, "type");
   if (type === "assistant") {
-    const content = arrayField(recordField(message, "message"), "content");
-    return content.flatMap((block): RuntimeEvent[] => {
+    const body = recordField(message, "message");
+    const messageId = stringField(body, "id") ?? state.messageId;
+    return arrayField(body, "content").flatMap((block, index): RuntimeEvent[] => {
       const blockType = stringField(block, "type");
-      if (blockType === "text") {
-        const text = stringField(block, "text");
-        return text === undefined ? [] : [{ type: "message_delta", text }];
-      }
-      if (blockType === "thinking") {
-        const text = stringField(block, "thinking");
-        return text === undefined ? [] : [{ type: "thinking_delta", text }];
+      if (blockType === "text" || blockType === "thinking") {
+        const complete = stringField(block, blockType === "text" ? "text" : "thinking");
+        if (complete === undefined) return [];
+        const key = `${messageId}:${index}:${blockType}`;
+        const previous = state.streamed.get(key) ?? "";
+        const text = complete.startsWith(previous) ? complete.slice(previous.length) : "";
+        state.streamed.set(key, complete);
+        if (text === "") return [];
+        return blockType === "text" ? [{ type: "message_delta", text }] : [{ type: "thinking_delta", text,
+          format: "trace", traceId: `${messageId}:${index}` }];
       }
       if (blockType === "tool_use") {
-        return [{
-          type: "tool_request",
-          tool: stringField(block, "name") ?? "tool",
-          input: field(block, "input"),
-        }];
+        const id = stringField(block, "id");
+        return [{ type: "tool_request", tool: stringField(block, "name") ?? "tool", input: field(block, "input"),
+          ...(id === undefined ? {} : { toolCallId: id }) }];
       }
+      // redacted_thinking/signature blocks expose no readable trace text.
       return [];
     });
   }
   if (type === "stream_event") {
     const event = recordField(message, "event");
+    const eventType = stringField(event, "type");
+    const index = numberField(event, "index") ?? 0;
+    if (eventType === "message_start") {
+      state.messageId = stringField(recordField(event, "message"), "id") ?? `stream-${state.nextMessage++}`;
+      state.tools.clear();
+      return [];
+    }
+    if (eventType === "content_block_start") {
+      const block = recordField(event, "content_block");
+      // Some SDK streams seed readable content in the start block before
+      // sending deltas. Emit it now and include it in final-message deduplication.
+      if (block.type === "text" || block.type === "thinking") {
+        const text = stringField(block, block.type === "text" ? "text" : "thinking") ?? "";
+        state.streamed.set(`${state.messageId}:${index}:${block.type}`, text);
+        return text === "" ? [] : block.type === "text" ? [{ type: "message_delta", text }]
+          : [{ type: "thinking_delta", text, format: "trace", traceId: `${state.messageId}:${index}` }];
+      }
+      if (block.type === "tool_use" && typeof block.id === "string") {
+        state.tools.set(index, { id: block.id, name: stringField(block, "name") ?? "tool", json: "" });
+        return [{ type: "tool_request", tool: stringField(block, "name") ?? "tool", input: block.input ?? {}, toolCallId: block.id }];
+      }
+    }
     const delta = recordField(event, "delta");
     const deltaType = stringField(delta, "type");
     const text = stringField(delta, "thinking") ?? stringField(delta, "text");
     if ((deltaType === "thinking_delta" || deltaType === "text_delta") && text !== undefined) {
-      return [{ type: deltaType === "thinking_delta" ? "thinking_delta" : "message_delta", text }];
+      const blockType = deltaType === "thinking_delta" ? "thinking" : "text";
+      const key = `${state.messageId}:${index}:${blockType}`;
+      state.streamed.set(key, (state.streamed.get(key) ?? "") + text);
+      return blockType === "text" ? [{ type: "message_delta", text }] : [{ type: "thinking_delta", text,
+        format: "trace", traceId: `${state.messageId}:${index}` }];
+    }
+    const tool = state.tools.get(index);
+    if (deltaType === "input_json_delta" && tool !== undefined && typeof delta.partial_json === "string") tool.json += delta.partial_json;
+    if (eventType === "content_block_stop" && tool !== undefined && tool.json !== "") {
+      try {
+        return [{ type: "tool_request", tool: tool.name, input: JSON.parse(tool.json) as unknown, toolCallId: tool.id }];
+      } catch { /* The final assistant tool block supplies authoritative input. */ }
     }
   }
   if (type === "user") {
-    const content = arrayField(recordField(message, "message"), "content");
-    return content
+    return arrayField(recordField(message, "message"), "content")
       .filter((block) => stringField(block, "type") === "tool_result")
-      .map((block) => ({ type: "tool_result", output: field(block, "content") }));
+      .map((block): RuntimeEvent => ({ type: "tool_result", output: field(block, "content"),
+        ...(stringField(block, "tool_use_id") === undefined ? {} : { toolCallId: stringField(block, "tool_use_id")! }),
+        isError: field(block, "is_error") === true }));
   }
   if (type === "result") {
     const subtype = stringField(message, "subtype");
@@ -361,4 +427,21 @@ function numberField(value: unknown, key: string): number | undefined {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && (error.name === "AbortError" || error.message.toLowerCase().includes("aborted"));
+}
+
+const CLAUDE_EFFORT_LEVELS: readonly EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Narrows an application effort value to the SDK's `EffortLevel`. Throwing
+ * (inside `startRun`'s try block) fails the attempt with a visible error;
+ * silently dropping an unsupported level would run at a different effort
+ * than the user chose. The SDK may still downgrade a level the selected
+ * model cannot use; that is provider behavior, not Rack's choice.
+ */
+function claudeEffort(value: string): EffortLevel {
+  const level = CLAUDE_EFFORT_LEVELS.find((candidate) => candidate === value);
+  if (level === undefined) {
+    throw new Error(`Claude does not support reasoning effort '${value}'.`);
+  }
+  return level;
 }

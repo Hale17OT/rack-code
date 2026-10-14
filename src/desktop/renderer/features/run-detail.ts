@@ -1,6 +1,5 @@
 /**
- * Run details, rendered inline when a run card in the transcript is
- * expanded: usage cards, labelled detail rows, permission mapping, status
+ * Run diagnostics, rendered in the right-side Run details surface: usage cards, labelled detail rows, permission mapping, status
  * guidance, recovery information, and the append-only journal.
  *
  * For finished runs, usage, failure retryability, and the last native
@@ -34,7 +33,7 @@ export function renderRunDetails(run: RunView, state: AppState, controller: Cont
     : foldEvents(journalEvents(journal ?? []));
   const attempt = run.attempts.at(-1);
   const account = state.accounts.find((candidate) => candidate.id === run.accountId);
-  const workspace = state.workspaces.find((candidate) => candidate.id === run.workspaceId);
+  const project = state.projects.find((candidate) => candidate.id === run.projectId);
   const runtime = state.runtimes.find((candidate) => candidate.runtimeId === runtimeOf(run));
   const guidance = RUN_GUIDANCE[run.status];
   const nativeSession = attempt?.nativeSessionId ?? summary.nativeSessionId;
@@ -53,7 +52,8 @@ export function renderRunDetails(run: RunView, state: AppState, controller: Cont
         row("Provider", run.providerId),
         row("Account", accountLabel(account, run.accountId)),
         row("Model", run.model ?? "default"),
-        row("Workspace", workspace?.path ?? shortId(run.workspaceId)),
+        row("Reasoning effort", run.reasoningEffort ?? "default"),
+        row("Project", project?.path ?? shortId(run.projectId)),
       ),
       h("div", { class: "detail-rows" },
         row("Permission", PERMISSION_LABELS[run.permissionMode].label),

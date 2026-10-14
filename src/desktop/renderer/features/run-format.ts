@@ -38,10 +38,10 @@ export function availabilityBadge(availability: AccountAvailability): HTMLElemen
 
 /** UI state description and allowed user actions per run status (spec table). */
 export const RUN_GUIDANCE: Readonly<Record<RunStatus, { readonly state: string; readonly actions: string }>> = {
-  queued: { state: "Waiting for workspace and runtime.", actions: "Cancel, or inspect the selected account and workspace." },
+  queued: { state: "Waiting for project and runtime.", actions: "Cancel, or inspect the selected account and project." },
   running: { state: "Streaming transcript and tool activity.", actions: "Respond to approvals or cancel." },
   completed: { state: "Completed; the assistant message is saved to the session.", actions: "Start another run to continue the session." },
-  failed: { state: "The provider or host reported an error.", actions: "Review the account and workspace, then retry. Re-authenticate when indicated." },
+  failed: { state: "The provider or host reported an error.", actions: "Review the account and project, then retry. Re-authenticate when indicated." },
   interrupted: { state: "Interrupted by the user or the runtime.", actions: "Inspect the partial transcript; continue with a new run." },
   unknown: {
     state: "The provider ended without a terminal outcome. Side effects may or may not have happened.",
@@ -50,13 +50,12 @@ export const RUN_GUIDANCE: Readonly<Record<RunStatus, { readonly state: string; 
 };
 
 export const PERMISSION_LABELS: Readonly<Record<PermissionMode, { readonly key: string; readonly label: string; readonly note: string }>> = {
-  read_only: { key: "RO", label: "Read only", note: "Denied by the app broker before any provider callback can authorize an action." },
+  read_only: { key: "RO", label: "Read only", note: "Uses the runtime's read-only sandbox or planning mode; attempted mutations are denied." },
   ask: { key: "ASK", label: "Ask me", note: "Every provider approval is presented to you." },
   approve_for_me: {
     key: "AUTO",
     label: "Approve for me",
-    // The spec requires labelling this accurately: no auto-approval exists yet.
-    note: "Not automatic yet: currently prompts exactly like Ask me.",
+    note: "The runtime's built-in automatic reviewer approves or denies actions. Rack does not prompt for tool approval.",
   },
   full_access: { key: "FULL", label: "Full access", note: "No approval prompts; the runtime bypasses its native checks within host permissions." },
 };

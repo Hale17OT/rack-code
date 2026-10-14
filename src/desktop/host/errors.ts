@@ -20,10 +20,10 @@ import {
   RuntimeNotFoundError,
 } from "../../core/execution/errors.js";
 import {
-  InvalidWorkspaceError,
-  WorkspaceBusyError,
-  WorkspaceNotFoundError,
-} from "../../core/workspaces/errors.js";
+  InvalidProjectError,
+  ProjectBusyError,
+  ProjectNotFoundError,
+} from "../../core/projects/errors.js";
 import { InvalidSessionError, SessionNotFoundError } from "../../core/sessions/errors.js";
 import { ConnectNotFoundError, ConnectorNotFoundError } from "../../core/connections/errors.js";
 import type { HostErrorCode, HostErrorPayload } from "../../contracts/desktop/errors.js";
@@ -56,11 +56,11 @@ export function toHostError(error: unknown): HostErrorPayload {
       details: { providerId: error.providerId, providerAccountId: error.providerAccountId },
     };
   }
-  if (error instanceof WorkspaceBusyError) {
+  if (error instanceof ProjectBusyError) {
     return {
       ...base,
-      code: "workspace_busy",
-      details: { workspaceId: error.workspaceId, attemptId: error.attemptId },
+      code: "project_busy",
+      details: { projectId: error.projectId, attemptId: error.attemptId },
     };
   }
   return { ...base, code: codeFor(error) };
@@ -70,7 +70,7 @@ function codeFor(error: Error): HostErrorCode {
   if (
     error instanceof ContractValidationError ||
     error instanceof InvalidAccountError ||
-    error instanceof InvalidWorkspaceError ||
+    error instanceof InvalidProjectError ||
     error instanceof InvalidSessionError
   ) {
     return "invalid_input";
@@ -78,7 +78,7 @@ function codeFor(error: Error): HostErrorCode {
   if (error instanceof AccountProviderMismatchError) return "provider_mismatch";
   if (error instanceof AccountNotFoundError) return "account_not_found";
   if (error instanceof NoEligibleAccountError) return "no_eligible_account";
-  if (error instanceof WorkspaceNotFoundError) return "workspace_not_found";
+  if (error instanceof ProjectNotFoundError) return "project_not_found";
   if (error instanceof SessionNotFoundError) return "session_not_found";
   if (error instanceof RuntimeNotFoundError) return "runtime_not_found";
   if (error instanceof RunNotFoundError) return "run_not_found";

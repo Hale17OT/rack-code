@@ -34,9 +34,15 @@ export interface RuntimeRunInput {
   readonly attemptId: AttemptId;
   readonly sessionId: string;
   readonly account: RuntimeAccountContext;
-  readonly workspacePath: string;
+  readonly projectPath: string;
   readonly prompt: string;
   readonly model?: string;
+  /**
+   * Reasoning effort chosen from the model's `reasoningEfforts`. Omitted
+   * means the provider default. Adapters forward it to the native control
+   * and must fail the attempt rather than silently drop an unsupported value.
+   */
+  readonly reasoningEffort?: string;
   readonly permissionMode: PermissionMode;
   readonly continuation?: RuntimeContinuation;
   readonly signal: AbortSignal;
@@ -60,19 +66,37 @@ export interface RuntimeModel {
   readonly description?: string;
   /** Provider-recommended default; the actual model ID is still sent on execution. */
   readonly isDefault?: boolean;
+  /**
+   * Reasoning effort levels the provider reports for this model, in the
+   * provider's order (typically lowest to highest). Absent or empty means
+   * the model has no selectable effort. IDs are provider values (for example
+   * "low", "high", "xhigh") passed back unchanged in `RuntimeRunInput`.
+   */
+  readonly reasoningEfforts?: readonly ReasoningEffortOption[];
+  /** The provider's default level for this model, when it reports one. */
+  readonly defaultReasoningEffort?: string;
+}
+
+/** One selectable reasoning effort level. */
+export interface ReasoningEffortOption {
+  /** Provider value, sent unchanged when the level is chosen. */
+  readonly id: string;
+  /** Provider-supplied explanation, when available. */
+  readonly description?: string;
 }
 
 /** Discovery uses the same isolated account context as execution, without a model turn. */
 export interface RuntimeModelInput {
   readonly account: RuntimeAccountContext;
-  readonly workspacePath?: string;
+  readonly projectPath?: string;
 }
 
 export type RuntimeEvent =
   | { readonly type: "message_delta"; readonly text: string }
-  | { readonly type: "thinking_delta"; readonly text: string }
-  | { readonly type: "tool_request"; readonly tool: string; readonly input: unknown }
-  | { readonly type: "tool_result"; readonly output: unknown }
+  | { readonly type: "thinking_delta"; readonly text: string; readonly format?: "trace" | "summary"; readonly traceId?: string }
+  | { readonly type: "tool_request"; readonly tool: string; readonly input: unknown; readonly toolCallId?: string }
+  | { readonly type: "tool_output_delta"; readonly text: string; readonly toolCallId?: string }
+  | { readonly type: "tool_result"; readonly output: unknown; readonly toolCallId?: string; readonly isError?: boolean }
   | { readonly type: "approval_request"; readonly request: ApprovalRequest }
   | { readonly type: "native_session"; readonly nativeSessionId: string }
   | { readonly type: "usage"; readonly inputTokens?: number; readonly outputTokens?: number; readonly costUsd?: number }
@@ -85,7 +109,7 @@ export interface RuntimeAdapter {
   readonly runtimeId: string;
   /** Stable provider identity used for account selection and model routing. */
   readonly providerId?: string;
-  /** Discovers selectable models for this account/workspace; rejects on provider failure. */
+  /** Discovers selectable models for this account/project; rejects on provider failure. */
   readonly models?: (input: RuntimeModelInput) => Promise<readonly RuntimeModel[]>;
   capabilities(account: RuntimeAccountContext): Promise<RuntimeCapabilities>;
   startRun(input: RuntimeRunInput): AsyncIterable<RuntimeEvent>;
@@ -103,11 +127,13 @@ export interface RuntimeAdapter {
 export interface RunRecord {
   readonly id: RunId;
   readonly sessionId: string;
-  readonly workspaceId: string;
+  readonly projectId: string;
   readonly prompt: string;
   readonly providerId: string;
   readonly accountId: string;
   readonly model?: string;
+  /** Requested reasoning effort; absent means the provider default. */
+  readonly reasoningEffort?: string;
   readonly permissionMode: PermissionMode;
   readonly status: RunStatus;
   readonly attemptIds: readonly AttemptId[];

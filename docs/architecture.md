@@ -1,6 +1,6 @@
 # Architecture
 
-Status: evolving architecture with the headless MVP foundation and first desktop UI implemented, updated 2026-10-13.
+Status: evolving architecture with the headless MVP foundation and first desktop UI implemented, updated 2026-10-14.
 
 This document is the architecture entry point required by [AGENTS.md](../AGENTS.md). It captures the agreed product direction and the boundaries used by the implemented headless MVP and desktop UI. Background hosting, browser integration, timeline, retrospective, orchestration, and isolated parallel work remain follow-on work.
 
@@ -66,15 +66,12 @@ Proposed ownership:
 | Accounts | Account identities, availability, selection, and switching policy | Provider-specific authentication and quota observations arrive through explicit interfaces |
 | Sessions | Application session identity, conversation history, continuation context, and native session associations | Runtime session IDs are associations, never the global session identity |
 | Execution | Run lifecycle, cancellation, recovery coordination, and execution records | Coordinates accounts, sessions, and runtimes through their public interfaces |
-| Projects and workspaces | Project identity, workspace references, and environment association | Platform access is supplied through adapters |
+| Projects | Selected folder identity, session context, execution path, and editing-run ownership | All consumers use one project ID; platform access is supplied through adapters |
 | Timeline | Project history views and feature-specific indexes relating execution and code changes | Consumes core records and Git information without owning session execution |
 | Retrospective | Post-run analysis and environment observations with provenance and validity | Contributes guidance through an explicit optional input; execution works without it |
 | Orchestration | User-defined workflows and stage assignments across models/providers | Calls the same execution services used by a single interactive run |
 
-The desktop presentation merges project roots and workspaces into one folder
-navigator so users choose a working directory once. The core keeps project and
-workspace records separate because sessions belong to projects while execution
-locks, paths, and provenance belong to workspaces.
+A project and a workspace are the same product concept: the selected folder and its sessions. The application has one `ProjectRecord`, one `ProjectsService`, and one `projectId` used by sessions, runs, model discovery, and writer locks. The UI consistently calls this entity a project; there is no second folder record or parent/child identity.
 
 The first six rows describe the implemented foundational modules. Connections sits above Accounts and Authentication so the dependency graph stays acyclic: Accounts depends on Authentication's credential types, and Connections depends on both.
 
@@ -86,7 +83,7 @@ Connected accounts use the `native_login` credential method: the provider keeps 
 
 The implemented shared runtime contract uses these operations and values:
 
-- `RuntimeAdapter.startRun(input)` starts an attempt from application-owned input containing the application session, attempt, workspace, prompt, selected model, permission mode, and optional native continuation reference.
+- `RuntimeAdapter.startRun(input)` starts an attempt from application-owned input containing the application session, attempt, project, prompt, selected model, permission mode, and optional native continuation reference.
 - `RuntimeAdapter.resumeRun(input)` continues a provider-native attempt when the adapter reports that resume is supported.
 - `RuntimeAdapter.cancelRun(attemptId)` requests interruption and reports whether the provider acknowledged it.
 - `RuntimeAdapter.describePermissionMode(mode)` returns adapter-owned text describing the native controls used for an application permission mode, so clients disclose the mapping without provider-name conditionals.
@@ -99,12 +96,27 @@ Runtime adapters may also expose a model catalog through the application-owned
 Catalog entries are deduplicated per provider/runtime/model ID while retaining
 the account IDs that reported each model; a failure for one account is
 returned as a partial discovery failure instead of hiding another account's
-models. Discovery uses the selected workspace path when one is available and
+models. Discovery uses the selected project path when one is available and
 never starts a model turn. Each model retains its provider and runtime routing
 metadata in the host contract, while the renderer presents only the model
 name, provider grouping, and description in a list-only picker. Selecting a
 model therefore chooses the correct adapter without exposing a Claude/Codex
 runtime switch or a free-form model input.
+
+Reasoning effort follows the same rule (added 2026-10-14). A `RuntimeModel`
+may report `reasoningEfforts` (provider level IDs with optional
+descriptions, in provider order) and a `defaultReasoningEffort`. The renderer
+offers only those levels for the selected model; `runs.start` carries the
+chosen `reasoningEffort`, which execution records on the run and passes to
+the adapter in `RuntimeRunInput`. Omitting it means the provider default.
+Level IDs are provider values rather than an application enum, because
+Codex reports them as free-form strings. The Codex adapter reads
+`supportedReasoningEfforts`/`defaultReasoningEffort` from `model/list` and
+sends `effort` on each `turn/start`. The Claude adapter reads
+`supportedEffortLevels` from `supportedModels()` (Claude reports no
+per-model default) and sets the SDK `effort` option, failing the attempt
+for a level outside the SDK's `EffortLevel` set rather than silently running
+at a different effort.
 
 The Codex adapter translates these operations into app-server initialization, thread, turn, notification, approval, and interruption messages. The Claude adapter translates them into Agent SDK query, session, permission, and streaming operations. Core execution handles the normalized operations and events without checking which provider produced them. A provider-specific feature is exposed as a capability or an explicitly named adapter extension; it is not implemented as a provider-name conditional in core code or the renderer. The concrete implementation and deferred behavior are recorded in [MVP implementation](mvp.md).
 
@@ -214,7 +226,7 @@ Browser lifetime must account for background mode: closing the control panel mus
 
 ### App-owned permission modes
 
-The app owns the selected mode and approve/decline interaction, and adapters translate that policy into supported runtime controls. Requested modes are read only, ask me, approve for me, and full access. Their exact action scopes and the reviewer used by approve for me remain open.
+The app owns the selected mode and approve/decline interaction, and adapters translate that policy into supported runtime controls. Requested modes are read only, ask me, approve for me, and full access. Approve for me delegates decisions to the native Codex `auto_review` reviewer or Claude `auto` classifier. The adapters pass explicit permission settings for each run, including resumed sessions, and preserve provider denials. Rack does not implement a separate auto-approval algorithm or fall back to full access. Ask me alone forwards native tool-approval requests into the app broker; read-only enforcement denies attempted mutations at the native boundary.
 
 Read-only enforcement must cover tools that can mutate through commands, browser actions, or external services, not just file-edit tools. Approval callbacks are not necessarily invoked for every tool, so mappings must account for runtime allow rules, hooks, sandboxing, and any stricter upstream restrictions. Full access expresses the user's requested scope within available runtime and host permissions; it cannot override controls outside the app.
 
@@ -222,7 +234,7 @@ Do not silently weaken a mode when switching runtimes. If an adapter cannot enfo
 
 ## Sessions, continuity, and records
 
-Global sessions belong to the application and are grouped within projects. One user-facing conversation can be continued by Codex, Claude, or another supported runtime. This does not merge every independent conversation in a project into one transcript. Preserve structured conversation content, workspace references, execution outcomes, and continuation context independently from native runtime session IDs. Associate each execution attempt with its runtime, account, model, and any native continuation data.
+Global sessions belong to the application and are grouped within projects. One user-facing conversation can be continued by Codex, Claude, or another supported runtime. This does not merge every independent conversation in a project into one transcript. Preserve structured conversation content, project references, execution outcomes, and continuation context independently from native runtime session IDs. Associate each execution attempt with its runtime, account, model, and any native continuation data.
 
 Proposed identities: a session is the ongoing application conversation; a run is a requested unit of work; an attempt is execution using a particular account and runtime. Native Codex threads and Claude SDK sessions remain associated execution state under the application session. Naming and schema are proposals, not finalized contracts.
 
@@ -238,13 +250,13 @@ Use runtime-reported availability and reset information when supplied. Keep any 
 
 Core execution records support continuity independently of timeline. Optional features can build indexes or analyses from those records. Define stable identifiers, ordering within a run, and schema versions when records are implemented. Record only observable runtime information; do not promise traces that an upstream runtime does not expose.
 
-## Workspace ownership and concurrent work
+## Project ownership and concurrent work
 
-A session owns conversation context; a workspace identifies the files and environment a run operates on. Switching accounts or handing sequential work from one runtime to another continues in the same workspace. The app coordinates its own runs so only one editing run writes to a shared workspace at a time.
+A session belongs to one project, which identifies the selected folder. Sessions and runs refer to the same `projectId`; execution rejects a run that names another project before recording work or acquiring a writer. Switching accounts or handing sequential work from one runtime to another continues in that project. The app coordinates its own runs so only one editing run writes to the project folder at a time.
 
-Independent parallel work uses isolated workspaces by default. Git worktrees are the preferred candidate for Git projects, with separate working directories and branches. Combining results is an explicit operation. The app must record which workspace and starting revision each run used so history can attribute changes correctly. For projects without Git, an isolation mechanism remains to be chosen when parallel work is implemented.
+Future independent parallel work will use isolated execution directories associated with the existing project; those directories are not a second user-facing project or workspace concept. Git worktrees are the preferred candidate for Git projects, with separate working directories and branches. Combining results is an explicit operation. When isolation is implemented, the app must record the execution directory and starting revision alongside the project so history can attribute changes correctly. For projects without Git, an isolation mechanism remains to be chosen when parallel work is implemented.
 
-Creating an isolated workspace must account for uncommitted user changes; starting from the last commit alone can omit the actual project state. The method for transferring or snapshotting those changes remains open. Tests and review tools may mutate files or external services, so they are not automatically safe to run alongside an editing agent in the same workspace. Coordination of external editors and changes made outside the app remains a design task; the app should detect relevant drift before applying or merging agent results.
+Creating an isolated execution directory must account for uncommitted user changes; starting from the last commit alone can omit the actual project state. The method for transferring or snapshotting those changes remains open. Tests and review tools may mutate files or external services, so they are not automatically safe to run alongside an editing agent in the same project. Coordination of external editors and changes made outside the app remains a design task; the app should detect relevant drift before applying or merging agent results.
 
 ## Persistence and optional feature lifecycle
 
@@ -256,7 +268,7 @@ Record the requested action, its runtime and account attempt, confirmed outcomes
 
 Keep native runtime transcripts and identifiers separately for provider-supported resume. Store large outputs, screenshots, and diffs as referenced artifacts instead of loading them with ordinary session history. Keep credentials in protected storage outside conversation and execution records. Retention, backup, encryption, and artifact storage formats remain open.
 
-Version persisted sessions and records, and supply explicit migrations as their schemas evolve. Keep credentials out of conversation and execution logs. Provider-native payloads should remain scoped and versioned rather than silently becoming universal application data.
+Version persisted sessions and records, and supply explicit migrations as their schemas evolve. Projects now use `projects.json` schema 4; sessions and execution use schema 3. The project store imports the old project/child-workspace document and `workspaces.json` before its first write, retaining folder IDs as project IDs or aliases to the canonical project when duplicate paths exist. Session and run migrations prefer the old `workspaceId` over any obsolete parent `projectId`, then resolve duplicate folder aliases to the canonical project. Both histories remain under the one folder row. Messages, continuations, attempts, journal entries, outcomes, revisions, and writer ownership remain intact. After migration the canonical documents are authoritative; the legacy `workspaces.json` file is left unchanged, while older projects, sessions, and execution documents are upgraded in place. Keep credentials out of conversation and execution logs. Provider-native payloads should remain scoped and versioned rather than silently becoming universal application data.
 
 Optional features are bundled, first-party modules with settings toggles. They declare their required core capabilities and any optional relationships. Composition validates those dependencies and registers their UI contributions and subscriptions. Disabling a feature removes its contributions and stops its workers without deleting its stored data or breaking basic execution. The behavior of a toggle during active work must be defined per feature. Downloadable plugins, arbitrary third-party code, and runtime code unloading are outside the current scope. Themes and fonts are settings, not a reason to create a plugin system.
 
@@ -268,7 +280,7 @@ Performance is a requirement to measure, not a guarantee implied by modularity. 
 
 Before setting budgets, measure startup, streaming responsiveness, persistence overhead, memory use, and handoff latency. Check performance in the packaged app as well as development mode.
 
-Keep local workspace and execution access behind focused platform interfaces. Use explicit environment references where sessions and workspace operations need them, rather than embedding the assumption of one local computer everywhere. Future remote adapters can introduce transport, remote identity, and connectivity handling. Do not build a generic distributed platform or remote desktop protocol now.
+Keep local project and execution access behind focused platform interfaces. Use explicit environment references where sessions and project operations need them, rather than embedding the assumption of one local computer everywhere. Future remote adapters can introduce transport, remote identity, and connectivity handling. Do not build a generic distributed platform or remote desktop protocol now.
 
 ## Verification and evolution
 
@@ -286,9 +298,29 @@ The following questions affect multiple modules. They are discussion items, not 
 | 2 | Execution ownership and lifetime | Default stop-on-exit and optional background execution are requested. Decide host supervision, exact quit behavior, and reconnection protocol. | Determines process supervision, IPC, shutdown, and future remote hosting boundaries. A separate process is not by itself an independent background service. |
 | 3 | Session and recovery contract | Agree on session, run, attempt, and checkpoint identities; define canonical recorded content, native continuation data, and ownership of writes. | Affects account handoff, restart recovery, timeline, and orchestration. One logical session must not imply unrestricted concurrent mutation of one conversation. |
 | 4 | Execution authority and permissions | Four app-owned modes are requested. Define their exact scopes, the approve-for-me reviewer, runtime mappings, and preservation of pending approvals. | UI modes, runtimes, and account switching must not create inconsistent authority. Do not assume every runtime can route all tools through an app-owned executor. |
-| 5 | Workspace concurrency | Shared workspace for sequential handoffs; one app-managed writer per shared workspace; isolated workspaces for independent parallel work. Decide how to include uncommitted changes, detect external edits, and isolate projects without Git. | Future orchestration, code attribution, and timeline accuracy depend on this boundary. |
+| 5 | Project concurrency | Same project folder for sequential handoffs; one app-managed writer per project folder; future isolated execution directories for independent parallel work. Decide how to include uncommitted changes, detect external edits, and isolate projects without Git. | Future orchestration, code attribution, and timeline accuracy depend on this boundary. |
 | 6 | Durable storage ownership | Execution host owns application state and an append-only journal; outcome and state updates should be atomic where possible. Select a storage engine, artifact format, migrations, retention, backup, and recovery handling for unknown external outcomes. | The chosen store must make confirmed progress trustworthy without claiming arbitrary tool actions can be rolled back atomically. |
 | 7 | Optional feature lifecycle | Scope clarified: bundled first-party modules toggled in settings. Define per-feature behavior when disabling during active work. | Stopping an optional worker must not abandon core runs or delete their history. |
 | 8 | Presentation, browsers, and distribution | Terminal mode is intended as this harness's presentation. Browser sharing and ownership need agreement. Identify initial operating systems and how runtime executables are supplied and updated. | Determines whether interfaces retain core guarantees and whether integrations work in the packaged application. |
 
 Detailed retrospective policies, orchestration editing, timeline presentation, and model-selection UX can wait for their feature discussions. Exact UI, storage, build, and testing libraries should be selected when the corresponding foundation work is approved; those library choices should not substitute for the ownership decisions above.
+
+## Local session import
+
+The user approved discovery of local Codex and Claude sessions for a selected project folder on 2026-10-14. See [local session import](session-import.md) for usage, contracts, and limitations. The Session Imports coordinator consumes read-only native-history sources behind adapters, validates the exact project path, and copies selected conversation/tool history into the Sessions capability. Discovery returns partial source failures; importing the same source/native ID into a project is idempotent. The renderer offers discovery, a conversation preview, and explicit import from the project row.
+
+Imported history is a snapshot, not an active run or an execution journal created by Rack. Native source IDs are recorded as provenance, separate from native continuation associations. Since Rack uses isolated account directories, imported conversations continue in a fresh runtime context with their visible user/assistant history supplied as background. Original transcripts and credentials are not copied or modified. Native resume across account stores, live synchronization, export-file imports, subagent histories, and other providers remain future work. Unsupported attachments are labelled rather than silently presented as copied media. Import does not restore workspace files or grant the original session's permissions.
+
+## Runtime activity presentation
+
+Updated 2026-10-14. Normalized events add optional thinking format/trace identity, tool call IDs and explicit tool output deltas. These fields are application-owned; provider interpretation remains in runtime adapters. Thinking summaries remain distinguishable from readable trace text, and no adapter decodes opaque/encrypted reasoning. Tool output chunks do not imply completion. Correlation uses native IDs when available and retains a legacy fallback for ID-less records.
+
+The renderer retains current-session activity after live runs finish and rebuilds it from the persisted journal on reopen. It uses cached event folds for both active and completed turns. Thinking text is open by default and unlabelled, with the summary/trace distinction kept in the control's accessible name; commands/files get formatted activity cards with targets, status, duration, output and diffs. Unknown data remains inspectable, and unfinished/uncertain actions are not shown as successful. Batch import is a renderer-coordinated series of idempotent host imports, with explicit partial success and retries. Permission labels change presentation only, preserving host enforcement and diagnostic mappings.
+
+## Current project changes
+
+Updated 2026-10-14. Projects exposes `getChanges(projectId)` through the desktop command `projects.changes`. It resolves the saved project folder and delegates to a `ProjectChangesReader` port. Startup composes the read-only `GitProjectChangesReader`; project identity, execution and persistence do not depend on Git preview availability. The adapter reads staged/unstaged differences against HEAD and bounded untracked text previews, scoped to that folder. Repositories without commits use staged plus unstaged patches. Results report ready, non-Git, or unavailable; read errors propagate to the panel. No project files or index entries are mutated.
+
+The Changes surface polls at two-second intervals while visible, serializes reads and rejects replies for a different selected project. It shows current working-tree changes, including edits made before or outside a run; it does not claim agent attribution or persist a diff artifact. Non-Git diffs, filesystem watchers, per-run baselines and large artifact storage remain unimplemented. Response footers contain only timestamps; diagnostic run details move to a separate right-panel surface.
+
+Native permission parameter verification (2026-10-14): Codex CLI 0.162.1 generated protocol bindings expose `approvalsReviewer` on thread start/resume and turn start, with `auto_review` supported. An isolated ephemeral thread-start check returned the requested reviewer and sandbox; no model turn was started. Claude Agent SDK’s installed declarations support `auto`. Provider availability and managed restrictions still govern whether automatic review can execute an action. See [Codex app-server permission parameters](https://developers.openai.com/codex/app-server/) and [Claude SDK permission modes](https://code.claude.com/docs/en/agent-sdk/permissions).

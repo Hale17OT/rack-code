@@ -30,7 +30,7 @@ const regions = mountShell(root, store, controller);
 mountNavigator(regions.navigator, store, controller);
 mountSessionView(regions.session, regions.sessionHeader, store, controller);
 mountComposer(regions.composer, store, controller);
-mountWorkbench(regions.workbench, store, regions.isWorkbenchVisible);
+mountWorkbench(regions.workbench, store, regions.isWorkbenchVisible, controller);
 mountSettings(regions.overlay, store, controller);
 
 controller.loadPreferences();

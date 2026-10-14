@@ -15,10 +15,11 @@ import type {
   RuntimeModelInput,
   RuntimeRunInput,
 } from "../../core/execution/types.js";
-import { InMemoryWorkspaceStore } from "../../core/workspaces/in-memory-store.js";
-import { WorkspacesService } from "../../core/workspaces/service.js";
+import { InMemoryProjectStore } from "../../core/projects/in-memory-store.js";
+import { ProjectsService } from "../../core/projects/service.js";
 import { InMemorySessionStore } from "../../core/sessions/in-memory-store.js";
 import { SessionsService } from "../../core/sessions/service.js";
+import { SessionImportsService } from "../../core/session-imports/service.js";
 import type { CommandResponse, HostEvent } from "../../contracts/desktop/index.js";
 import { ConnectionsService, NATIVE_LOGIN_METHOD } from "../../core/connections/service.js";
 import type { AccountConnector, ConnectAttempt, ConnectContext, ConnectEvent } from "../../core/connections/ports.js";
@@ -112,12 +113,12 @@ class FakeConnector implements AccountConnector {
 
 async function setup() {
   const accounts = new AccountsService(new InMemoryAccountStore());
-  const workspaces = new WorkspacesService(new InMemoryWorkspaceStore());
+  const projects = new ProjectsService(new InMemoryProjectStore());
   const sessions = new SessionsService(new InMemorySessionStore());
   const runtimes = new RuntimeRegistry();
   runtimes.register(new ApprovalRuntime());
   runtimes.register(new BlockingRuntime());
-  const execution = new ExecutionService(new InMemoryExecutionStore(), accounts, sessions, workspaces, runtimes);
+  const execution = new ExecutionService(new InMemoryExecutionStore(), accounts, sessions, projects, runtimes);
   const connector = new FakeConnector();
   const connections = new ConnectionsService(
     accounts,
@@ -125,7 +126,8 @@ async function setup() {
     [connector],
   );
   const events: HostEvent[] = [];
-  const api = new HostApi({ accounts, workspaces, sessions, execution, runtimes, connections }, (event) => events.push(event));
+  const sessionImports = new SessionImportsService(projects, sessions, []);
+  const api = new HostApi({ accounts, projects, sessions, sessionImports, execution, runtimes, connections }, (event) => events.push(event));
 
   const call = async <T>(command: string, params: unknown = {}): Promise<T> => {
     const response = await api.dispatch(command, params);
@@ -135,15 +137,15 @@ async function setup() {
     return response.value as T;
   };
 
-  const workspace = await call<{ id: string }>("workspaces.create", { path: "/tmp/demo" });
-  const session = await call<{ id: string }>("sessions.create", { workspaceId: workspace.id });
+  const project = await call<{ id: string }>("projects.create", { path: "/tmp/demo" });
+  const session = await call<{ id: string }>("sessions.create", { projectId: project.id });
   const account = await call<{ id: string }>("accounts.register", {
     providerId: "fake",
     providerAccountId: "user-1",
     credential: { id: "cred-1", providerId: "fake", method: "token" },
     runtimeContextId: "ctx-1",
   });
-  return { api, call, events, accounts, connector, workspace, session, account };
+  return { api, call, events, accounts, connector, project, session, account };
 }
 
 function waitFor(events: HostEvent[], predicate: (event: HostEvent) => boolean): Promise<HostEvent> {
@@ -179,13 +181,13 @@ test("errors carry stable codes and structured details", async () => {
   assert.equal(!duplicate.ok && duplicate.error.code, "duplicate_account");
   assert.deepEqual(!duplicate.ok && duplicate.error.details, { providerId: "fake", providerAccountId: "user-1" });
 
-  const invalid = await api.dispatch("workspaces.create", { path: "" });
+  const invalid = await api.dispatch("projects.create", { path: "" });
   assert.equal(!invalid.ok && invalid.error.code, "invalid_input");
 
-  const extra = await api.dispatch("workspaces.list", { unexpected: true });
+  const extra = await api.dispatch("projects.list", { unexpected: true });
   assert.equal(!extra.ok && extra.error.code, "invalid_input");
 
-  const unknown: CommandResponse = await api.dispatch("workspaces.drop", {});
+  const unknown: CommandResponse = await api.dispatch("projects.drop", {});
   assert.equal(!unknown.ok && unknown.error.code, "unknown_command");
 
   const missing = await api.dispatch("sessions.get", { sessionId: "nope" });
@@ -202,7 +204,7 @@ test("runtimes report adapter permission mappings", async () => {
 });
 
 test("model catalog combines accounts and reports partial discovery failures", async () => {
-  const { call, account, workspace } = await setup();
+  const { call, account, project } = await setup();
   const second = await call<{ id: string }>("accounts.register", {
     providerId: "fake",
     providerAccountId: "user-2",
@@ -219,7 +221,7 @@ test("model catalog combines accounts and reports partial discovery failures", a
   const catalog = await call<{
     models: Array<{ id: string; accountIds: string[]; runtimeId: string }>;
     failures: Array<{ accountId: string }>;
-  }>("models.list", { workspaceId: workspace.id });
+  }>("models.list", { projectId: project.id });
   assert.deepEqual(catalog.models.map((model) => model.id), ["fake-model"]);
   assert.deepEqual(catalog.models[0]?.accountIds.sort(), [account.id, second.id].sort());
   assert.equal(catalog.models[0]?.runtimeId, "approval-runtime");
@@ -227,10 +229,10 @@ test("model catalog combines accounts and reports partial discovery failures", a
 });
 
 test("a run streams indexed events, parks approvals for any client, and finishes", async () => {
-  const { call, events, workspace, session, account } = await setup();
+  const { call, events, project, session, account } = await setup();
   const started = await call<{ run: { id: string } }>("runs.start", {
     sessionId: session.id,
-    workspaceId: workspace.id,
+    projectId: project.id,
     providerId: "fake",
     runtimeId: "approval-runtime",
     accountId: account.id,
@@ -277,11 +279,11 @@ test("a run streams indexed events, parks approvals for any client, and finishes
   assert.equal(journal.at(-1)?.type, "run_status");
 });
 
-test("starting on a busy workspace returns workspace_busy with the owning attempt", async () => {
-  const { api, call, events, workspace, session, account } = await setup();
+test("starting on a busy project returns project_busy with the owning attempt", async () => {
+  const { api, call, events, project, session, account } = await setup();
   const params = {
     sessionId: session.id,
-    workspaceId: workspace.id,
+    projectId: project.id,
     providerId: "fake",
     runtimeId: "blocking-runtime",
     accountId: account.id,
@@ -292,7 +294,7 @@ test("starting on a busy workspace returns workspace_busy with the owning attemp
   await waitFor(events, (event) => event.type === "run.event");
 
   const busy = await api.dispatch("runs.start", params);
-  assert.equal(!busy.ok && busy.error.code, "workspace_busy");
+  assert.equal(!busy.ok && busy.error.code, "project_busy");
   assert.equal(!busy.ok && busy.error.details?.["attemptId"], started.run.attemptIds[0]);
 
   // Cancellation is idempotent and the run reaches `interrupted`.
@@ -304,10 +306,10 @@ test("starting on a busy workspace returns workspace_busy with the owning attemp
 });
 
 test("shutdown cancels active runs and waits for terminal states", async () => {
-  const { api, call, events, workspace, session, account } = await setup();
+  const { api, call, events, project, session, account } = await setup();
   await call("runs.start", {
     sessionId: session.id,
-    workspaceId: workspace.id,
+    projectId: project.id,
     providerId: "fake",
     runtimeId: "blocking-runtime",
     accountId: account.id,
@@ -320,7 +322,7 @@ test("shutdown cancels active runs and waits for terminal states", async () => {
 });
 
 test("an automatic account choice reports fallback from the selected account", async () => {
-  const { call, events, accounts, workspace, session, account } = await setup();
+  const { call, events, accounts, project, session, account } = await setup();
   const second = await call<{ id: string }>("accounts.register", {
     providerId: "fake",
     providerAccountId: "user-2",
@@ -333,7 +335,7 @@ test("an automatic account choice reports fallback from the selected account", a
 
   const started = await call<{ run: { id: string; accountId: string }; fallbackFromAccountId?: string }>("runs.start", {
     sessionId: session.id,
-    workspaceId: workspace.id,
+    projectId: project.id,
     providerId: "fake",
     runtimeId: "blocking-runtime",
     prompt: "wait",
@@ -408,4 +410,21 @@ test("cancelling a sign-in reports cancelled and stops the provider", async () =
   assert.equal(!missing.ok && missing.error.code, "connect_not_found");
   const unknown = await api.dispatch("auth.connect", { providerId: "nope" });
   assert.equal(!unknown.ok && unknown.error.code, "connector_not_found");
+});
+
+test("a project is the only folder identity exposed by the host", async () => {
+  const { api, call, events, project, session } = await setup();
+  const projects = await call<Array<{ id: string; path: string }>>("projects.list");
+  assert.deepEqual(projects.map((item) => item.id), [project.id]);
+  assert.equal(projects[0]?.path, "/tmp/demo");
+  const savedSession = await call<{ projectId: string }>("sessions.get", { sessionId: session.id });
+  assert.equal(savedSession.projectId, project.id);
+  assert.equal("workspaceId" in savedSession, false);
+  assert.ok(events.some((event) => event.type === "projects.changed"));
+  const obsolete = await api.dispatch("workspaces.list", {});
+  assert.equal(!obsolete.ok && obsolete.error.code, "unknown_command");
+  const missing = await api.dispatch("sessions.create", { projectId: "no-such-project" });
+  assert.equal(!missing.ok && missing.error.code, "project_not_found");
+  const oldInput = await api.dispatch("sessions.create", { projectId: project.id, workspaceId: "obsolete" });
+  assert.equal(!oldInput.ok && oldInput.error.code, "invalid_input");
 });

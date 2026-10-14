@@ -60,3 +60,51 @@ test("native session IDs are recorded as diagnostics, not transcript items", () 
   assert.equal(state.items.length, 0);
   assert.equal(state.nativeSessionId, "n-1");
 });
+
+test("parallel tools use call IDs and output deltas do not finish a call", () => {
+  const streaming = foldEvents([
+    { type: "tool_request", tool: "shell", input: { command: "first" }, toolCallId: "a" },
+    { type: "tool_request", tool: "shell", input: { command: "second" }, toolCallId: "b" },
+    { type: "tool_output_delta", toolCallId: "a", text: "part 1 " },
+    { type: "tool_output_delta", toolCallId: "a", text: "part 2" },
+    { type: "tool_result", toolCallId: "b", output: "second result" },
+  ]);
+  const first = streaming.items[0];
+  assert.ok(first?.kind === "tool");
+  assert.equal(first.output, "part 1 part 2");
+  assert.equal(first.finished, false);
+  const completed = applyEvent(streaming, { type: "tool_result", toolCallId: "a", output: "full output", isError: true });
+  const result = completed.items[0];
+  assert.ok(result?.kind === "tool");
+  assert.equal(result.output, "full output");
+  assert.equal(result.finished, true);
+  assert.equal(result.isError, true);
+  assert.equal(completed.items[1]?.kind === "tool" && completed.items[1].output, "second result");
+});
+
+test("updating a tool's arguments preserves its streamed output and unknown IDs stay unpaired", () => {
+  const state = foldEvents([
+    { type: "tool_request", tool: "read", input: {}, toolCallId: "one" },
+    { type: "tool_output_delta", text: "partial", toolCallId: "one" },
+    { type: "tool_request", tool: "read", input: { path: "file.ts" }, toolCallId: "one" },
+    { type: "tool_result", output: "unrelated", toolCallId: "unknown" },
+    { type: "tool_result", output: "legacy unknown" },
+  ]);
+  assert.equal(state.items.length, 3);
+  assert.equal(state.items[0]?.kind === "tool" && state.items[0].output, "partial");
+  assert.equal(state.items[0]?.kind === "tool" && state.items[0].finished, false);
+  assert.equal(state.items[1]?.kind, "tool_output");
+  assert.equal(state.items[2]?.kind, "tool_output");
+});
+
+test("thinking summaries and traces keep distinct identities when streams interleave", () => {
+  const state = foldEvents([
+    { type: "thinking_delta", text: "Summary", format: "summary", traceId: "summary" },
+    { type: "thinking_delta", text: "Trace ", format: "trace", traceId: "trace" },
+    { type: "tool_request", tool: "read", input: {} },
+    { type: "thinking_delta", text: "continues", format: "trace", traceId: "trace" },
+  ]);
+  assert.equal(state.items.length, 3);
+  assert.equal(state.items[1]?.kind === "thinking" && state.items[1].text, "Trace continues");
+  assert.equal(state.items[0]?.kind === "thinking" && state.items[0].format, "summary");
+});

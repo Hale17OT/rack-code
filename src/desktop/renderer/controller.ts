@@ -3,7 +3,7 @@
  *
  * Features call these methods instead of talking to the host directly, so
  * loading, refreshing after events, and error presentation are implemented
- * once. The controller holds no domain rules: account choice, workspace
+ * once. The controller holds no domain rules: account choice, project
  * locking, approvals, and run state all stay in the host. It only decides
  * what to (re)load and how to present failures.
  *
@@ -19,10 +19,13 @@ import {
   type StartRunParams,
   type ActiveRunView,
   type RunView,
+  type SessionDiscovery,
+  type ExternalSessionSnapshot,
 } from "../../contracts/desktop/index.js";
 import type { HostClient } from "./host-client.js";
 import { loadEnabledPlugins, saveEnabledPlugins } from "./surfaces.js";
 import type { AppState, LiveRun, Notice, SettingsSection, Store } from "./store.js";
+import { eventsFromJournal } from "./transcript.js";
 
 export class Controller {
   private ready = false;
@@ -36,6 +39,16 @@ export class Controller {
     private readonly store: Store,
   ) {}
 
+  /** Read-only project snapshot; the Changes panel owns loading/error display. */
+  getProjectChanges(projectId: string, repositoryPath?: string) {
+    return this.host.call("projects.changes", { projectId, ...(repositoryPath === undefined ? {} : { repositoryPath }) });
+  }
+
+  /** Discovery is cached by the host; explicit rescan bypasses that cache. */
+  discoverProjectRepositories(projectId: string, options: import("../../contracts/desktop/views.js").RepositoryDiscoveryOptions = {}) {
+    return this.host.call("projects.repositories", { projectId, ...options });
+  }
+
   async start(): Promise<void> {
     this.host.onEvent((event) => {
       if (this.ready) {
@@ -45,13 +58,13 @@ export class Controller {
       }
     });
     try {
-      const [connectProviders, connecting, accounts, runtimes, models, workspaces, sessions, active] = await Promise.all([
+      const [connectProviders, connecting, accounts, runtimes, models, projects, sessions, active] = await Promise.all([
         this.host.call("auth.providers", {}),
         this.host.call("auth.active", {}),
         this.host.call("accounts.list", {}),
         this.host.call("runtimes.list", {}),
         this.host.call("models.list", {}),
-        this.host.call("workspaces.list", {}),
+        this.host.call("projects.list", {}),
         this.host.call("sessions.list", {}),
         this.host.call("runs.active", {}),
       ]);
@@ -62,7 +75,7 @@ export class Controller {
         runtimes,
         models: models.models,
         modelCatalogFailures: models.failures,
-        workspaces,
+        projects,
         sessions,
         connectProviders,
         connects: Object.fromEntries(connecting.map((connect) => [connect.connectId, connect])),
@@ -72,12 +85,12 @@ export class Controller {
       for (const event of this.bufferedEvents.splice(0)) {
         this.handleEvent(event);
       }
-      // Open the most recently updated session, or the first workspace.
+      // Open the most recently updated session, or the first project.
       const firstSession = sessions[0];
       if (firstSession !== undefined) {
         await this.selectSession(firstSession.id);
-      } else if (workspaces[0] !== undefined) {
-        await this.selectWorkspace(workspaces[0].id);
+      } else if (projects[0] !== undefined) {
+        await this.selectProject(projects[0].id);
       }
     } catch (error) {
       this.ready = true;
@@ -88,14 +101,15 @@ export class Controller {
   // ---------------------------------------------------------------------------
   // Navigation
 
-  /** Makes one workspace current without opening a session. */
-  async selectWorkspace(workspaceId: string): Promise<void> {
-    if (this.store.get().selection.workspaceId === workspaceId) return;
+  /** Makes one project current without opening a session. */
+  async selectProject(projectId: string): Promise<void> {
+    if (this.store.get().selection.projectId === projectId) return;
     this.store.update((state) => ({
       ...state,
-      selection: { workspaceId, sessionId: undefined, runId: undefined },
+      selection: { projectId, sessionId: undefined, runId: undefined },
       session: undefined,
       runs: [],
+      transcripts: {},
       journal: undefined,
     }));
     await this.reloadModels();
@@ -103,20 +117,20 @@ export class Controller {
 
   /** Opens a session; its project becomes the current project. */
   async selectSession(sessionId: string): Promise<void> {
-    const workspaceId = this.store.get().sessions.find((session) => session.id === sessionId)?.workspaceId;
-    const workspaceChanged = workspaceId !== undefined && workspaceId !== this.store.get().selection.workspaceId;
+    const projectId = this.store.get().sessions.find((session) => session.id === sessionId)?.projectId;
+    const projectChanged = projectId !== undefined && projectId !== this.store.get().selection.projectId;
     this.store.update((state) => ({
       ...state,
-      selection: { workspaceId: workspaceId ?? state.selection.workspaceId, sessionId, runId: undefined },
+      selection: { projectId: projectId ?? state.selection.projectId, sessionId, runId: undefined },
     }));
     await Promise.all([
       this.reloadSession(sessionId),
-      workspaceChanged ? this.reloadWorkspaces() : Promise.resolve(),
+      projectChanged ? this.reloadProjects() : Promise.resolve(),
       this.reloadModels(),
     ]);
   }
 
-  /** Expands a run's details in the transcript, or collapses them when already open. */
+  /** Selects a run for diagnostics and loads its journal; selecting it again clears selection. */
   async selectRun(runId: string): Promise<void> {
     if (this.store.get().selection.runId === runId) {
       this.store.update((state) => ({ ...state, selection: { ...state.selection, runId: undefined } }));
@@ -156,38 +170,75 @@ export class Controller {
   }
 
   // ---------------------------------------------------------------------------
-  // Workspaces and sessions
+  // Projects and sessions
 
   /**
-   * Creates the backing records for a folder selected by the unified
-   * workspace navigator. The renderer derives the display name from the
-   * native folder picker, while the core still keeps project and workspace
-   * records separate for execution and persistence.
+   * Creates one project for the folder selected in the native picker.
+   * Sessions, model discovery, and runs all use this same project identity.
    */
-  async createWorkspace(params: { path: string; kind?: "shared" | "isolated"; startingRevision?: string }): Promise<boolean> {
+  async createProject(params: { path: string; startingRevision?: string }): Promise<boolean> {
     return this.attempt(async () => {
-      const workspace = await this.host.call("workspaces.create", params);
-      await this.reloadWorkspaces();
-      await this.selectWorkspace(workspace.id);
+      const project = await this.host.call("projects.create", params);
+      await this.reloadProjects();
+      await this.selectProject(project.id);
     });
   }
 
-  /** Creates a session directly from a workspace row, without a title form. */
-  async createSessionForWorkspace(workspaceId: string): Promise<boolean> {
-    const workspace = this.store.get().workspaces.find((candidate) => candidate.id === workspaceId);
-    if (workspace === undefined) return false;
-    return this.createSession(workspace.id);
+  /** Creates a session directly from a project row, without a title form. */
+  async createSessionForProject(projectId: string): Promise<boolean> {
+    const project = this.store.get().projects.find((candidate) => candidate.id === projectId);
+    if (project === undefined) return false;
+    return this.createSession(project.id);
   }
 
-  async createSession(workspaceId: string, title?: string): Promise<boolean> {
+  async createSession(projectId: string, title?: string): Promise<boolean> {
     return this.attempt(async () => {
       const session = await this.host.call("sessions.create", {
-        workspaceId,
+        projectId,
         ...(title === undefined ? {} : { title }),
       });
       await this.reloadSessions();
       await this.selectSession(session.id);
     });
+  }
+
+  /** Local-history UI uses the same host boundary; no filesystem access in the renderer. */
+  discoverSessions(projectId: string): Promise<SessionDiscovery> {
+    return this.host.call("sessions.discover", { projectId });
+  }
+
+  previewImport(projectId: string, sourceId: string, nativeSessionId: string): Promise<ExternalSessionSnapshot> {
+    return this.host.call("sessions.previewImport", { projectId, sourceId, nativeSessionId });
+  }
+
+  async importSession(projectId: string, sourceId: string, nativeSessionId: string): Promise<boolean> {
+    return this.attempt(async () => {
+      const result = await this.host.call("sessions.import", { projectId, sourceId, nativeSessionId });
+      await this.reloadSessions();
+      await this.selectSession(result.session.id);
+    });
+  }
+
+  /** Batch import keeps each successful snapshot when another source fails. */
+  async importSessions(projectId: string, selected: readonly { sourceId: string; nativeSessionId: string }[]): Promise<{
+    imported: readonly { sourceId: string; nativeSessionId: string; sessionId: string }[];
+    failed: readonly { sourceId: string; nativeSessionId: string }[];
+  }> {
+    const imported: { sourceId: string; nativeSessionId: string; sessionId: string }[] = [];
+    const failed: { sourceId: string; nativeSessionId: string }[] = [];
+    for (const source of selected) {
+      try {
+        const result = await this.host.call("sessions.import", { projectId, ...source });
+        imported.push({ ...source, sessionId: result.session.id });
+      } catch {
+        failed.push(source);
+      }
+    }
+    if (imported.length > 0) {
+      await this.reloadSessions();
+      await this.selectSession(imported.at(-1)!.sessionId);
+    }
+    return { imported, failed };
   }
 
   /** Native folder picker (desktop shell, not the host); `undefined` on cancel. */
@@ -303,11 +354,11 @@ export class Controller {
         });
       }
     }, (error) => {
-      if (error instanceof HostCommandError && error.code === "workspace_busy") {
+      if (error instanceof HostCommandError && error.code === "project_busy") {
         return {
           kind: "error",
           code: error.code,
-          message: `This workspace is being edited by attempt ${error.details["attemptId"] ?? "unknown"}. Retry after it finishes.`,
+          message: `This project is being edited by attempt ${error.details["attemptId"] ?? "unknown"}. Retry after it finishes.`,
           action: { label: "Retry", run: () => void this.startRun(params) },
         };
       }
@@ -375,8 +426,8 @@ export class Controller {
         void this.reloadAccounts();
         void this.reloadModels();
         return;
-      case "workspaces.changed":
-        void this.reloadWorkspaces();
+      case "projects.changed":
+        void this.reloadProjects();
         return;
       case "sessions.changed":
         void this.reloadSessions();
@@ -426,7 +477,10 @@ export class Controller {
       const runs = state.selection.sessionId === run.sessionId
         ? upsertRun(state.runs, run)
         : state.runs;
-      return { ...state, live, runs };
+      const events = state.live[run.id]?.events;
+      const transcripts = state.selection.sessionId === run.sessionId && events !== undefined
+        ? { ...state.transcripts, [run.id]: events } : state.transcripts;
+      return { ...state, live, runs, transcripts };
     });
     if (this.store.get().selection.runId === run.id) {
       void this.reloadJournal(run.id);
@@ -457,11 +511,11 @@ export class Controller {
     });
   }
 
-  /** Refreshes provider-backed models after account or workspace changes. */
+  /** Refreshes provider-backed models after account or project changes. */
   private reloadModels(): Promise<void> {
     return this.coalesce("models", async () => {
-      const workspaceId = this.store.get().session?.workspaceId;
-      const models = await this.host.call("models.list", workspaceId === undefined ? {} : { workspaceId });
+      const projectId = this.store.get().session?.projectId;
+      const models = await this.host.call("models.list", projectId === undefined ? {} : { projectId });
       this.store.update((state) => ({
         ...state,
         models: models.models,
@@ -470,11 +524,11 @@ export class Controller {
     });
   }
 
-  /** Keeps the workspace-only navigator supplied with current folder records. */
-  private reloadWorkspaces(): Promise<void> {
-    return this.coalesce("workspaces", async () => {
-      const workspaces = await this.host.call("workspaces.list", {});
-      this.store.update((state) => ({ ...state, workspaces }));
+  /** Keeps the project-only navigator supplied with current folder records. */
+  private reloadProjects(): Promise<void> {
+    return this.coalesce("projects", async () => {
+      const projects = await this.host.call("projects.list", {});
+      this.store.update((state) => ({ ...state, projects }));
     });
   }
 
@@ -491,7 +545,19 @@ export class Controller {
         this.host.call("sessions.get", { sessionId }),
         this.host.call("runs.list", { sessionId }),
       ]);
-      this.store.update((state) => state.selection.sessionId === sessionId ? { ...state, session, runs } : state);
+      const cache = this.store.get().transcripts;
+      const saved = await Promise.all(runs.map(async (run) => {
+        if (this.store.get().live[run.id] !== undefined) return [run.id, undefined] as const;
+        if (cache[run.id] !== undefined) return [run.id, cache[run.id]!] as const;
+        return [run.id, eventsFromJournal(await this.host.call("runs.journal", { runId: run.id }))] as const;
+      }));
+      this.store.update((state) => state.selection.sessionId === sessionId ? {
+        ...state, session, runs,
+        transcripts: Object.fromEntries(saved.flatMap(([id, events]) => {
+          const current = state.transcripts[id] ?? events;
+          return current === undefined ? [] : [[id, current]];
+        })),
+      } : state);
     });
   }
 
@@ -567,10 +633,10 @@ export function describeError(error: unknown, state: AppState): Notice {
       return { ...base, message: "That account belongs to a different provider than the one selected." };
     case "no_eligible_account":
       return { ...base, message: "No account for this provider is marked available. Choose an account explicitly." };
-    case "workspace_busy":
-      return { ...base, message: `Workspace is being edited by attempt ${error.details["attemptId"] ?? "unknown"}. Retry after it finishes.` };
+    case "project_busy":
+      return { ...base, message: `Project is being edited by attempt ${error.details["attemptId"] ?? "unknown"}. Retry after it finishes.` };
     case "account_not_found":
-    case "workspace_not_found":
+    case "project_not_found":
     case "session_not_found":
     case "run_not_found":
     case "attempt_not_found":

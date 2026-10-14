@@ -15,12 +15,13 @@ export interface ModalHandle {
 export interface ModalOptions {
   readonly title: string;
   readonly content: HTMLElement;
+  readonly className?: string;
   readonly onClose?: () => void;
 }
 
 export function openModal(options: ModalOptions): ModalHandle {
   const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
-  const dialog = h("div", { class: "modal", aria: { modal: "true", label: options.title } },
+  const dialog = h("div", { class: `modal ${options.className ?? ""}`.trim(), aria: { modal: "true", label: options.title } },
     h("div", { class: "modal-header" },
       h("h2", { class: "modal-title" }, options.title),
       h("button", { class: "icon-button", type: "button", title: "Close", aria: { label: "Close" }, onClick: () => handle.close() }, icon("x")),

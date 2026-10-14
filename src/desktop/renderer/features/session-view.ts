@@ -5,15 +5,13 @@
  * - the prompt is a right-aligned bubble; long prompts are clipped with a
  *   "Show full message" toggle;
  * - the reply is plain text in the page (no bubble), rendered as Markdown.
- *   While a run is active it shows the live event fold: streaming text,
- *   collapsed thinking traces, and compact one-line tool rows that expand
- *   on click. A finished run shows its persisted assistant message;
+ *   Live and persisted event folds show streamed text, readable thinking
+ *   panels, and formatted command/file activity cards. Completed turns keep
+ *   their activity after reload; the saved assistant message is a fallback;
  * - pending approvals are not part of the transcript. The composer renders
  *   them in an overlay above the prompt (see `composer.ts`);
- * - a quiet meta row under the reply has copy, time, the account, model,
- *   and permission labels, a Details toggle (inline run details and
- *   journal), and Stop while active. The runtime is not shown because the
- *   selected model already determines it.
+ * - the quiet footer shows only the date and time; active runs are stopped
+ *   from the composer.
  *
  * Also renders the session title in the toolbar slot, a left-edge turn
  * navigator (one tick per turn, highlighting those in view), and a
@@ -26,16 +24,17 @@
 import type {
   RunView,
   SessionView,
-  WorkspaceView,
+  ProjectView,
+  RuntimeEvent,
 } from "../../../contracts/desktop/index.js";
 import type { Controller } from "../controller.js";
-import { formatData, formatTime, h, replace, shortId } from "../dom.js";
+import { formatTime, h, replace, shortId } from "../dom.js";
 import { icon } from "../icons.js";
 import { renderMarkdown } from "../markdown.js";
-import type { AppState, LiveRun, Store } from "../store.js";
+import type { AppState, Store } from "../store.js";
 import { foldEvents, type TranscriptItem, type TranscriptState } from "../transcript.js";
-import { renderRunDetails } from "./run-detail.js";
-import { accountLabel, isActiveStatus, PERMISSION_LABELS } from "./run-format.js";
+import { accountLabel, isActiveStatus } from "./run-format.js";
+import { importedTool, presentTool } from "./tool-presentation.js";
 
 /** Prompts longer than this (characters or lines) start clipped. */
 const LONG_PROMPT_CHARS = 600;
@@ -46,6 +45,7 @@ const AT_END_THRESHOLD = 48;
 interface ViewMemory {
   readonly expandedPrompts: Set<string>;
   readonly openTools: Set<string>;
+  readonly collapsedThinking: Set<string>;
 }
 
 export function mountSessionView(root: HTMLElement, header: HTMLElement, store: Store, controller: Controller): void {
@@ -58,7 +58,7 @@ export function mountSessionView(root: HTMLElement, header: HTMLElement, store: 
   scrollToEnd.hidden = true;
   root.append(transcript, rail, scrollToEnd);
 
-  const memory: ViewMemory = { expandedPrompts: new Set(), openTools: new Set() };
+  const memory: ViewMemory = { expandedPrompts: new Set(), openTools: new Set(), collapsedThinking: new Set() };
   let current: AppState | undefined;
   const rerender = () => {
     if (current !== undefined) draw(current, false);
@@ -66,11 +66,11 @@ export function mountSessionView(root: HTMLElement, header: HTMLElement, store: 
 
   // Folding is memoized per events array: unchanged live runs are not re-folded.
   const folds = new WeakMap<readonly unknown[], TranscriptState>();
-  const fold = (live: LiveRun): TranscriptState => {
-    let state = folds.get(live.events);
+  const fold = (events: readonly RuntimeEvent[]): TranscriptState => {
+    let state = folds.get(events);
     if (state === undefined) {
-      state = foldEvents(live.events);
-      folds.set(live.events, state);
+      state = foldEvents(events);
+      folds.set(events, state);
     }
     return state;
   };
@@ -92,13 +92,13 @@ export function mountSessionView(root: HTMLElement, header: HTMLElement, store: 
     updateChrome();
   }
 
-  store.watch((state) => [state.session, state.workspaces, state.selection.sessionId], (_slice, state) => {
-    replace(header, ...renderHeader(state.session, state.workspaces));
+  store.watch((state) => [state.session, state.projects, state.selection.sessionId], (_slice, state) => {
+    replace(header, ...renderHeader(state.session, state.projects));
   });
 
   let lastSessionId: string | undefined;
   store.watch(
-    (state) => [state.session, state.runs, state.live, state.accounts, state.selection.runId, state.journal, state.workspaces, state.runtimes, state.acknowledgedUnknown],
+    (state) => [state.session, state.runs, state.live, state.transcripts, state.accounts, state.selection.runId, state.journal, state.projects, state.runtimes, state.acknowledgedUnknown],
     (_slice, state) => {
       current = state;
       const sessionChanged = state.session?.id !== lastSessionId;
@@ -108,22 +108,21 @@ export function mountSessionView(root: HTMLElement, header: HTMLElement, store: 
   );
 }
 
-function renderHeader(session: SessionView | undefined, workspaces: readonly WorkspaceView[]): Node[] {
+function renderHeader(session: SessionView | undefined, projects: readonly ProjectView[]): Node[] {
   if (session === undefined) {
     return [h("span", { class: "session-title muted" }, "No session")];
   }
-  const workspace = workspaces.find((candidate) => candidate.id === session.workspaceId);
+  const project = projects.find((candidate) => candidate.id === session.projectId);
   const meta = [
-    workspace?.path ?? shortId(session.workspaceId),
-    workspace?.kind,
-    workspace?.startingRevision?.slice(0, 7),
+    project?.path ?? shortId(session.projectId),
+    project?.startingRevision?.slice(0, 7),
   ].filter((part) => part !== undefined).join(" / ");
   return [
     h("span", { class: "session-title" }, session.title ?? `Session ${shortId(session.id)}`),
     h("span", { class: "session-meta", title: meta }, meta),
     h("div", { class: "session-chips" },
-      workspace?.activeWriterAttemptId === undefined ? null : h("span", { class: "chip" },
-        icon("pencil-simple"), `writer ${shortId(workspace.activeWriterAttemptId)}`),
+      project?.activeWriterAttemptId === undefined ? null : h("span", { class: "chip" },
+        icon("pencil-simple"), `writer ${shortId(project.activeWriterAttemptId)}`),
     ),
   ];
 }
@@ -131,13 +130,13 @@ function renderHeader(session: SessionView | undefined, workspaces: readonly Wor
 function renderTranscript(
   state: AppState,
   controller: Controller,
-  fold: (live: LiveRun) => TranscriptState,
+  fold: (events: readonly RuntimeEvent[]) => TranscriptState,
   memory: ViewMemory,
   rerender: () => void,
 ): Node[] {
   const session = state.session;
   if (session === undefined || state.selection.sessionId === undefined) {
-    return [placeholder("chat-circle-text", "No session selected", "Add a workspace folder, then use its + button to start a session.")];
+    return [placeholder("chat-circle-text", "No session selected", "Add a project folder, then use its + button to start a session.")];
   }
 
   // Live runs of this session that the persisted list does not contain yet.
@@ -145,48 +144,62 @@ function renderTranscript(
     .map((live) => live.run)
     .filter((run) => run.sessionId === session.id && !state.runs.some((stored) => stored.id === run.id));
   const runs = [...state.runs, ...liveOnly];
-  if (runs.length === 0) {
-    return [placeholder("terminal-window", "What should we work on?", "Describe a task below. The agent works in this session's workspace.")];
+  const imported = session.messages.filter((message) => message.metadata?.["imported"] === "true");
+  if (runs.length === 0 && imported.length === 0) {
+    return [placeholder("terminal-window", "What should we work on?", "Describe a task below. The agent works in this session's project.")];
   }
-  return runs.map((run) => renderTurn(run, state, controller, fold, memory, rerender));
+  return [
+    ...(session.importSource === undefined ? [] : [h("div", { class: "import-history-note note" }, icon("database"),
+      `Imported from ${session.importSource.providerName}. Continuing uses recent conversation context in a new runtime session; the original remains unchanged.`)]),
+    ...imported.map((message) => h("article", { class: "turn imported-turn", data: { importedMessageId: message.id } },
+      message.role === "user" ? renderPrompt({ id: message.id, prompt: message.content }, memory, rerender)
+        : message.role === "assistant" ? h("div", { class: "reply md" }, renderMarkdown(message.content, (href) => controller.openExternal(href)))
+        : message.metadata?.["presentation"] === "thinking"
+          ? thinkingLine(message.id, memory, message.content, message.metadata?.["thinkingFormat"] === "summary" ? "summary" : "trace", (href) => controller.openExternal(href))
+          : activityLine(message.id, memory, importedTool(message.content), false),
+    )),
+    ...runs.map((run) => renderTurn(run, state, controller, fold, memory, rerender)),
+  ];
 }
 
 function renderTurn(
   stored: RunView,
   state: AppState,
   controller: Controller,
-  fold: (live: LiveRun) => TranscriptState,
+  fold: (events: readonly RuntimeEvent[]) => TranscriptState,
   memory: ViewMemory,
   rerender: () => void,
 ): HTMLElement {
   const live = state.live[stored.id];
   const run = live?.run ?? stored;
   const account = state.accounts.find((candidate) => candidate.id === run.accountId);
-  const detailsOpen = state.selection.runId === run.id;
   const openLink = (href: string) => controller.openExternal(href);
 
   const reply: Node[] = [];
   let copyText = "";
-  if (live !== undefined) {
-    const folded = fold(live);
+  const events = live?.events ?? state.transcripts[run.id];
+  const folded = events === undefined ? undefined : fold(events);
+  if (folded !== undefined) {
     for (const [index, item] of folded.items.entries()) {
-      reply.push(renderItem(item, `${run.id}:${index}`, memory, openLink));
+      reply.push(renderItem(item, `${run.id}:${index}`, memory, openLink, live !== undefined && isActiveStatus(run.status)));
     }
     copyText = folded.items.flatMap((item) => item.kind === "text" ? [item.text] : []).join("\n\n");
     if (folded.failure !== undefined) reply.push(errorLine(folded.failure.error));
-    if (isActiveStatus(run.status)) {
-      reply.push(h("div", { class: "working" },
-        icon("circle-notch", { className: "spin" }),
-        live.cancelRequested ? "Stopping" : run.status === "queued" ? "Waiting for the workspace" : "Working"));
+  }
+  if (live !== undefined) {
+    if (isActiveStatus(run.status) && (reply.length === 0 || live.cancelRequested)) {
+      reply.push(h("div", { class: "note working" }, icon("circle-notch", { className: "spin" }),
+        live.cancelRequested ? "Stopping" : run.status === "queued" ? "Waiting for the project" : "Working"));
     }
   } else {
-    const assistant = state.session?.messages.find((message) =>
-      message.role === "assistant" && message.metadata?.["runId"] === run.id);
-    copyText = assistant?.content ?? run.result ?? "";
-    if (copyText !== "") reply.push(h("div", { class: "md" }, renderMarkdown(copyText, openLink)));
-    if (run.error !== undefined) reply.push(errorLine(run.error));
-    if (run.status === "interrupted") reply.push(h("div", { class: "note" }, icon("stop-circle"), "Stopped"));
-    if (run.status === "unknown") reply.push(h("div", { class: "note" }, icon("question"), "Ended without a final result. Open Details before continuing."));
+    if (copyText === "") {
+      const assistant = state.session?.messages.find((message) => message.role === "assistant" && message.metadata?.["runId"] === run.id);
+      copyText = assistant?.content ?? run.result ?? "";
+      if (copyText !== "") reply.push(h("div", { class: "md" }, renderMarkdown(copyText, openLink)));
+    }
+    if (run.error !== undefined && folded?.failure === undefined) reply.push(errorLine(run.error));
+    if (run.status === "interrupted" && !folded?.items.some((item) => item.kind === "status" && item.label === "interrupted")) reply.push(h("div", { class: "note" }, icon("stop-circle"), "Stopped"));
+    if (run.status === "unknown") reply.push(h("div", { class: "note" }, icon("question"), "Ended without a final result. Review the activity before continuing."));
   }
   if (live?.fallbackFromAccountId !== undefined) {
     const from = state.accounts.find((candidate) => candidate.id === live.fallbackFromAccountId);
@@ -194,38 +207,28 @@ function renderTurn(
       `${accountLabel(from, live.fallbackFromAccountId)} was unavailable; using ${accountLabel(account, run.accountId)}.`));
   }
 
-  const labels = [accountLabel(account, run.accountId), run.model, PERMISSION_LABELS[run.permissionMode].label]
-    .filter((part): part is string => part !== undefined).join(" · ");
-  const meta = h("div", { class: "turn-meta" },
-    copyText === "" ? null : h("button", {
-      class: "icon-button meta-button",
-      title: "Copy reply",
-      aria: { label: "Copy reply" },
-      onClick: (event) => void copy(copyText, event.currentTarget as HTMLButtonElement),
-    }, icon("copy")),
-    h("span", { class: "meta-time" }, formatTime(run.createdAt)),
-    h("span", { class: "meta-labels" }, labels),
-    h("button", {
-      class: detailsOpen ? "meta-link active" : "meta-link",
-      aria: { expanded: String(detailsOpen) },
-      onClick: () => void controller.selectRun(run.id),
-    }, "Details"),
-    live !== undefined && isActiveStatus(run.status)
-      ? h("button", {
-        class: "meta-link",
-        disabled: live.cancelRequested,
-        onClick: () => void controller.cancelRun(run.id),
-      }, live.cancelRequested ? "Stopping" : "Stop")
-      : null,
+  const active = isActiveStatus(run.status);
+  const meta = active ? h("div", { class: "run-progress", role: "status", aria: { label: live?.cancelRequested ? "Stopping" : "Run in progress" } },
+    h("span", { class: "progress-dots", aria: { hidden: "true" } }, h("span"), h("span"), h("span")),
+  ) : h("div", { class: "turn-meta" },
+    h("time", { class: "meta-time", title: run.createdAt }, formatTime(run.createdAt)),
   );
+  if (active) {
+    // Streaming redraws rebuild the turn. Phase dots against the run timestamp
+    // so their animation keeps advancing instead of restarting on each token.
+    const elapsed = Math.max(0, Date.now() - Date.parse(run.createdAt)) || 0;
+    meta.querySelectorAll<HTMLElement>(".progress-dots > span").forEach((dot, index) => {
+      dot.style.animationDelay = `${-(elapsed % 1200) - (3 - index) * 150}ms`;
+    });
+  }
 
   return h("article", { class: "turn", data: { runId: run.id } },
     renderPrompt(run, memory, rerender),
-    h("div", { class: "reply" }, ...reply, meta, detailsOpen ? renderRunDetails(run, state, controller) : null),
+    h("div", { class: "reply" }, ...reply, meta),
   );
 }
 
-function renderPrompt(run: RunView, memory: ViewMemory, rerender: () => void): HTMLElement {
+function renderPrompt(run: Pick<RunView, "id" | "prompt">, memory: ViewMemory, rerender: () => void): HTMLElement {
   const long = run.prompt.length > LONG_PROMPT_CHARS || run.prompt.split("\n").length > LONG_PROMPT_LINES;
   const expanded = memory.expandedPrompts.has(run.id);
   return h("div", { class: "prompt-row" },
@@ -244,75 +247,78 @@ function renderPrompt(run: RunView, memory: ViewMemory, rerender: () => void): H
 }
 
 function renderItem(
-  item: TranscriptItem,
-  key: string,
-  memory: ViewMemory,
-  openLink: (href: string) => void,
+  item: TranscriptItem, key: string, memory: ViewMemory,
+  openLink: (href: string) => void, active: boolean,
 ): Node {
   switch (item.kind) {
-    case "text":
-      return h("div", { class: "md" }, renderMarkdown(item.text, openLink));
-    case "thinking":
-      // Reasoning stays collapsed and is never mixed into the reply text.
-      return thinkingLine(key, memory, item.text);
-    case "tool":
-      return toolLine(key, memory, item.hasOutput ? "check" : "circle-notch", item.tool, item.hasOutput ? "" : "running",
-        [["Input", item.input], ...(item.hasOutput ? [["Output", item.output] as const] : [])], !item.hasOutput);
-    case "tool_output":
-      return toolLine(key, memory, "terminal-window", "Tool result", "", [["Output", item.output]], false);
-    case "status":
-      return h("div", { class: "note" }, icon("info"), item.label, item.detail === undefined ? null : `: ${item.detail}`);
+    case "text": return h("div", { class: "md" }, renderMarkdown(item.text, openLink));
+    case "thinking": return thinkingLine(key, memory, item.text, item.format, openLink);
+    case "tool": return activityLine(key, memory, item, active);
+    case "tool_output": return activityLine(key, memory, {
+      kind: "tool", tool: "Tool output", input: undefined, output: item.output, hasOutput: true, finished: true,
+    }, false);
+    case "status": return h("div", { class: "note" }, icon("info"), item.label, item.detail === undefined ? null : `: ${item.detail}`);
   }
 }
 
-/** One-line tool row; expands to show input/output. Open state survives re-renders. */
-function toolLine(
-  key: string,
-  memory: ViewMemory,
-  iconName: Parameters<typeof icon>[0],
-  title: string,
-  status: string,
-  sections: ReadonlyArray<readonly [string, unknown]>,
-  spinning: boolean,
-): HTMLElement {
-  const details = h("details", { class: "tool-line", open: memory.openTools.has(key) },
+/** Activity starts as a compact status row; details appear only on user expansion. */
+function activityLine(key: string, memory: ViewMemory, item: Extract<TranscriptItem, { kind: "tool" }>, active: boolean): HTMLElement {
+  const view = presentTool(item, active);
+  const running = view.status === "Running";
+  const details = h("details", { class: `activity-card${view.status === "Failed" ? " failed" : ""}`, open: memory.openTools.has(key) },
     h("summary", {},
-      icon(iconName, { className: spinning ? "spin" : "" }),
-      h("span", { class: "tool-line-title" }, title),
-      status === "" ? null : h("span", { class: "tool-line-status" }, status),
-      icon("caret-right", { className: "tool-line-caret" }),
-    ),
-    ...sections.map(([name, value]) => h("div", { class: "tool-line-section" },
-      h("span", { class: "label" }, name),
-      h("pre", {}, formatData(value)),
-    )),
+      h("span", { class: "activity-icon" }, icon(view.icon)),
+      h("span", { class: "activity-heading" },
+        h("span", { class: "activity-title" }, view.title === "Run command"
+          ? `${running ? "Running" : view.status === "Completed" ? "Ran" : view.status} command`
+          : `${view.status} · ${view.title}`),
+        view.subtitle === undefined ? null : h("code", { class: "activity-target", title: view.subtitle }, view.subtitle)),
+      h("span", { class: "activity-meta" },
+        view.duration === undefined ? null : h("span", {}, view.duration),
+        view.exitCode === undefined ? null : h("span", {}, `exit ${view.exitCode}`),
+        h("span", { class: "activity-status", title: view.status, aria: { label: view.status } }, icon(running ? "circle-notch" : view.status === "Failed" ? "x-circle" : view.status === "Stopped" ? "stop-circle" : view.status === "Completed" ? "check" : "question", { className: running ? "spin" : "" }))),
+      icon("caret-right", { className: "activity-caret" })),
+    h("div", { class: "activity-body" }, ...view.sections.map((section) => h("section", { class: "activity-section" },
+      h("span", { class: "activity-section-label" }, section.label),
+      section.format === "diff" ? h("pre", { class: "activity-diff" }, h("code", {}, ...section.text.split("\n").map((line) =>
+        h("span", { class: /^(@@|---|\+\+\+)/.test(line) ? "diff-header" : line.startsWith("+") ? "diff-add" : line.startsWith("-") ? "diff-remove" : "diff-context" }, line || " "))))
+        : h("pre", { class: `activity-code activity-${section.format}` }, section.text),
+    ))),
   );
   details.addEventListener("toggle", () => {
-    if (details.open) memory.openTools.add(key);
-    else memory.openTools.delete(key);
+    if (details.open) memory.openTools.add(key); else memory.openTools.delete(key);
   });
   return details;
 }
 
 /**
- * Collapsed thinking trace in the same one-line style as tool rows. Its
- * open state shares the tool-row memory so it survives re-renders while
- * the trace is still streaming.
+ * Exposed thinking text, shown directly with a lightbulb and no text label.
+ *
+ * The trace is open by default. The lightbulb is the only control: it
+ * collapses the trace to a one-line preview and expands it again, and the
+ * choice survives re-renders through `memory.collapsedThinking`. Summaries
+ * and readable traces must stay distinguishable (architecture: runtime
+ * activity presentation), so the kind is carried by the button's accessible
+ * name and tooltip rather than a visible heading.
  */
-function thinkingLine(key: string, memory: ViewMemory, text: string): HTMLElement {
-  const details = h("details", { class: "tool-line thinking-line", open: memory.openTools.has(key) },
-    h("summary", {},
-      icon("lightbulb"),
-      h("span", { class: "tool-line-title" }, "Thinking"),
-      icon("caret-right", { className: "tool-line-caret" }),
-    ),
-    h("div", { class: "thinking-text" }, text),
-  );
-  details.addEventListener("toggle", () => {
-    if (details.open) memory.openTools.add(key);
-    else memory.openTools.delete(key);
+function thinkingLine(key: string, memory: ViewMemory, text: string, format: "trace" | "summary" | undefined, openLink: (href: string) => void): HTMLElement {
+  const kind = format === "summary" ? "Reasoning summary" : format === "trace" ? "Thinking trace" : "Thinking";
+  const prose = h("div", { class: "thinking-prose md" }, renderMarkdown(text, openLink));
+  const toggle = h("button", { class: "thinking-toggle", type: "button" }, icon("lightbulb"));
+  const panel = h("div", { class: "thinking-panel", data: { format: format ?? "unknown" } }, toggle, prose);
+  const sync = () => {
+    const collapsed = memory.collapsedThinking.has(key);
+    panel.classList.toggle("collapsed", collapsed);
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    toggle.setAttribute("aria-label", `${collapsed ? "Expand" : "Collapse"} ${kind.toLowerCase()}`);
+    toggle.title = kind;
+  };
+  toggle.addEventListener("click", () => {
+    if (memory.collapsedThinking.has(key)) memory.collapsedThinking.delete(key); else memory.collapsedThinking.add(key);
+    sync();
   });
-  return details;
+  sync();
+  return panel;
 }
 
 function errorLine(text: string): HTMLElement {
@@ -325,17 +331,6 @@ function placeholder(iconName: Parameters<typeof icon>[0], title: string, text: 
     h("p", { class: "placeholder-title" }, title),
     h("p", { class: "placeholder-text" }, text),
   );
-}
-
-/** Copies text and briefly swaps the button icon to a check mark. */
-async function copy(text: string, button: HTMLButtonElement): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text);
-    replace(button, icon("check"));
-    window.setTimeout(() => replace(button, icon("copy")), 1200);
-  } catch {
-    // Clipboard access can be refused; copying is a convenience.
-  }
 }
 
 /** One tick per turn; clicking a tick scrolls that turn into view. */

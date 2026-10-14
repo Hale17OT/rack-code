@@ -8,7 +8,6 @@
  * means a reconnecting renderer can answer an approval just like the original.
  */
 import {
-  PERMISSION_MODES,
   type AccountView,
   type ApprovalRequest,
   type ModelView,
@@ -18,13 +17,25 @@ import {
 } from "../../../contracts/desktop/index.js";
 import { createDropdown, type DropdownOption } from "../components/dropdown.js";
 import type { Controller } from "../controller.js";
-import { dataView, h, replace, row, shortId } from "../dom.js";
+import { h, replace } from "../dom.js";
 import { icon } from "../icons.js";
 import type { AppState, LiveRun, Store } from "../store.js";
 import { accountLabel, isActiveStatus, PERMISSION_LABELS } from "./run-format.js";
+import { presentTool } from "./tool-presentation.js";
 
 type AccountChoice = `auto:${string}` | `account:${string}:${string}`;
 type ModelChoice = string;
+/** An effort level ID from the model catalog, or `DEFAULT_EFFORT` to omit it. */
+type EffortChoice = string;
+
+/** Sentinel for "send no effort": the provider applies its own default. */
+const DEFAULT_EFFORT = "__default__";
+const EFFORT_KEY = "composer.reasoningEffort";
+
+/** Display names for common provider level IDs; unknown IDs are shown as reported. */
+const EFFORT_LABELS: Readonly<Record<string, string>> = {
+  none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max",
+};
 
 const MODE_ICONS: Readonly<Record<PermissionMode, Parameters<typeof icon>[0]>> = {
   read_only: "lock-simple", ask: "hand", approve_for_me: "shield-check", full_access: "lightning",
@@ -35,7 +46,7 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
   let submitting = false;
 
   const permission = createDropdown<PermissionMode>({
-    ariaLabel: "Permission mode", variant: "pill", icon: "shield", menuWidth: 340,
+    ariaLabel: "Permission mode", variant: "pill", icon: "shield", menuWidth: 200,
     onChange: (value) => { mode = value; refresh(store.get()); },
   });
   const account = createDropdown<AccountChoice>({
@@ -46,6 +57,19 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
   const model = createDropdown<ModelChoice>({
     ariaLabel: "Model", variant: "pill", icon: "robot", placeholder: "Choose a model", menuWidth: 340,
     onChange: () => refresh(store.get()),
+  });
+  /**
+   * Reasoning effort for the next run. Options come only from the selected
+   * model's catalog entry, so the picker never offers a level the provider
+   * did not report, and it is hidden for models without effort levels.
+   * `preferredEffort` is the user's last explicit choice (per device); when
+   * the selected model lacks it, the model's reported default is used, or
+   * "Default" (no effort sent) when the provider reports none.
+   */
+  let preferredEffort = loadEffort();
+  const effort = createDropdown<EffortChoice>({
+    ariaLabel: "Reasoning effort", variant: "pill", icon: "brain", menuWidth: 240,
+    onChange: (value) => { preferredEffort = value; saveEffort(value); refresh(store.get()); },
   });
 
   const connectPill = h("button", {
@@ -66,7 +90,7 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
     h("div", { class: "composer-card" },
       prompt,
       h("div", { class: "composer-toolbar" },
-        h("div", { class: "composer-pills" }, permission.element, account.element, connectPill, model.element),
+        h("div", { class: "composer-pills" }, permission.element, account.element, connectPill, model.element, effort.element),
         send,
       ),
     ),
@@ -104,11 +128,13 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
     if (submitting || session === undefined || selected === undefined || choice === undefined || text === "" || !canRun(state)) return;
     submitting = true;
     refresh(state);
+    const reasoningEffort = chosenEffort(selected.entry);
     const ok = await controller.startRun({
-      sessionId: session.id, workspaceId: session.workspaceId,
+      sessionId: session.id, projectId: session.projectId,
       runtimeId: selected.runtimeId, providerId: selected.providerId,
       ...(choice.accountId === undefined ? {} : { accountId: choice.accountId }),
       ...(selected.modelId === "default" ? {} : { model: selected.modelId }),
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
       prompt: text, permissionMode: mode,
     });
     submitting = false;
@@ -124,6 +150,14 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
   function canRun(state: AppState): boolean {
     return state.session !== undefined && state.host.status === "ready" && model.value !== undefined &&
       account.value !== undefined && unacknowledgedUnknown(state) === undefined && !modeDisabled(capabilitiesFor(state));
+  }
+
+  /** The effort to send for `entry`, or undefined for the provider default. */
+  function chosenEffort(entry: ModelView): string | undefined {
+    const value = effort.value;
+    return value === undefined || value === DEFAULT_EFFORT || !(entry.reasoningEfforts ?? []).some((option) => option.id === value)
+      ? undefined
+      : value;
   }
 
   function selectedModel(state: AppState): ModelView | undefined {
@@ -154,6 +188,8 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
   }
 
   function refresh(state: AppState): void {
+    const activeId = activeRunId(state);
+    if (activeId !== undefined) mode = state.live[activeId]!.run.permissionMode;
     const modelOptions: DropdownOption<ModelChoice>[] = state.models.map((entry) => ({
       value: modelKey(entry), label: entry.label,
       ...(entry.description === undefined ? {} : { description: entry.description }),
@@ -163,6 +199,7 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
     model.setOptions(modelOptions, model.value ?? (first === undefined ? undefined : modelKey(first)));
 
     const selected = selectedModel(state);
+    refreshEffort(selected);
     const targetProvider = selected?.providerId;
     const accounts = targetProvider === undefined ? [] : state.accounts.filter((entry) => entry.providerId === targetProvider);
     const accountOptions: DropdownOption<AccountChoice>[] = targetProvider === undefined || accounts.length === 0 ? [] : [
@@ -185,13 +222,10 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
     account.setOptions(accountOptions, accountStillValid ? currentAccount : (targetProvider === undefined ? undefined : `auto:${targetProvider}`));
 
     const caps = capabilitiesFor(state);
-    const runtimeView = selected === undefined ? undefined : state.runtimes.find((entry) => entry.runtimeId === selected.runtimeId);
-    permission.setOptions(PERMISSION_MODES.map((candidate) => {
+    permission.setOptions((["ask", "approve_for_me", "full_access", "read_only"] as const).map((candidate) => {
       const unavailable = caps !== undefined && !caps.approvals && (candidate === "ask" || candidate === "approve_for_me");
       return {
         value: candidate, label: PERMISSION_LABELS[candidate].label, icon: MODE_ICONS[candidate], disabled: unavailable,
-        description: unavailable ? "This runtime does not support interactive approvals." :
-          `${PERMISSION_LABELS[candidate].note}${runtimeView === undefined ? "" : ` Native: ${runtimeView.permissionMappings[candidate]}`}`,
       };
     }), mode);
 
@@ -215,9 +249,12 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
     const noSession = state.session === undefined || state.host.status !== "ready";
     prompt.disabled = noSession;
     prompt.placeholder = state.session === undefined ? "Open or start a session to run an agent" : "Ask the agent to do something";
-    permission.setDisabled(noSession);
+    // The selection is sent when a run starts, not changed mid-turn. Keep
+    // the picker truthful while active instead of showing a future setting.
+    permission.setDisabled(noSession || activeId !== undefined);
     account.setDisabled(noSession);
     model.setDisabled(noSession || modelOptions.length === 0);
+    effort.setDisabled(noSession);
 
     const active = activeRunId(state);
     if (active !== undefined) {
@@ -230,6 +267,31 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
       send.classList.remove("is-stop"); send.disabled = submitting || prompt.value.trim() === "" || !canRun(state);
       send.title = "Run (Enter)"; send.setAttribute("aria-label", "Run");
     }
+  }
+
+  function refreshEffort(selected: ModelView | undefined): void {
+    const levels = selected?.reasoningEfforts ?? [];
+    effort.element.hidden = levels.length === 0;
+    if (selected === undefined || levels.length === 0) {
+      effort.setOptions([], undefined);
+      return;
+    }
+    const reportedDefault = selected.defaultReasoningEffort;
+    const options: DropdownOption<EffortChoice>[] = [
+      // Without a reported default, "Default" lets the provider decide.
+      ...(reportedDefault === undefined ? [{ value: DEFAULT_EFFORT, label: "Default", description: "Use the provider's default effort" }] : []),
+      ...levels.map((level): DropdownOption<EffortChoice> => ({
+        value: level.id,
+        label: EFFORT_LABELS[level.id] ?? level.id,
+        ...(level.description === undefined && level.id !== reportedDefault ? {} : {
+          description: [level.id === reportedDefault ? "Default" : undefined, level.description].filter(Boolean).join(" / "),
+        }),
+      })),
+    ];
+    const value = options.some((option) => option.value === preferredEffort)
+      ? preferredEffort
+      : reportedDefault ?? DEFAULT_EFFORT;
+    effort.setOptions(options, value);
   }
 
   store.watch(
@@ -257,20 +319,55 @@ function pendingApprovals(state: AppState): readonly { readonly run: RunView; re
     .flatMap((live) => live.pendingApprovals.map((request) => ({ run: live.run, live, request })));
 }
 
-function renderApproval(request: ApprovalRequest, run: RunView, _live: LiveRun, state: AppState, controller: Controller): HTMLElement {
-  const account = state.accounts.find((candidate) => candidate.id === run.accountId);
+/**
+ * Renders one pending approval as "what you are approving" only: the action,
+ * its target (command, file, or query), the proposed change or arguments,
+ * and the provider's reason when given. Run/account/model metadata and IDs
+ * are deliberately omitted; they remain available in the right panel's Run
+ * details surface.
+ *
+ * The request is described with the same `presentTool` mapping the
+ * transcript's activity cards use, so an approval reads like the activity
+ * it will become. Unknown tool shapes still show their full arguments, so
+ * nothing the user is approving is hidden.
+ */
+function renderApproval(request: ApprovalRequest, run: RunView, _live: LiveRun, _state: AppState, controller: Controller): HTMLElement {
+  const view = presentTool({ kind: "tool", tool: request.tool, input: request.input, hasOutput: false, finished: false }, true);
+  // The command or path is already the card's target line; repeating it as a
+  // labelled section adds noise. Diffs and unknown arguments are kept.
+  const sections = view.sections.filter((section) => section.label !== "Command" && section.label !== "Directory");
   return h("div", { class: "approval approval-overlay-card" },
     h("div", { class: "approval-head" },
-      h("span", { class: "icon-tile" }, icon("hand")),
-      h("span", { class: "tool-text" }, h("span", { class: "tool-name" }, "Approval required"),
-        h("span", { class: "tool-meta" }, `${request.tool} / ${shortId(request.id)}`))),
+      h("span", { class: "activity-icon" }, icon(view.icon)),
+      h("span", { class: "approval-title" }, view.title)),
+    view.subtitle === undefined ? null : h("pre", { class: "approval-target" }, view.subtitle),
+    ...sections.map((section) => section.format === "diff"
+      ? h("pre", { class: "activity-diff approval-detail" }, h("code", {}, ...section.text.split("\n").map((line) =>
+        h("span", { class: /^(@@|---|\+\+\+)/.test(line) ? "diff-header" : line.startsWith("+") ? "diff-add" : line.startsWith("-") ? "diff-remove" : "diff-context" }, line || " "))))
+      : h("pre", { class: "activity-code approval-detail" }, section.text)),
     request.reason === undefined ? null : h("p", { class: "approval-reason" }, request.reason),
-    h("div", { class: "detail-rows" }, row("Account", accountLabel(account, run.accountId)), row("Model", run.model ?? "default"), row("Run / attempt", `${shortId(run.id)} / ${shortId(run.attempts.at(-1)?.id)}`)),
-    dataView("Input", request.input),
+    // These controls live inside the composer form. A submit button would
+    // also invoke submitOrStop(), cancelling the run just after answering it.
     h("div", { class: "approval-actions" },
-      h("button", { class: "button", onClick: () => void controller.respondToApproval(run.id, request.id, "deny") }, icon("x"), "Deny"),
-      h("button", { class: "button button-primary", onClick: () => void controller.respondToApproval(run.id, request.id, "allow") }, icon("check"), "Allow")),
+      h("button", { class: "button", type: "button", onClick: () => void controller.respondToApproval(run.id, request.id, "deny") }, icon("x"), "Deny"),
+      h("button", { class: "button button-primary", type: "button", onClick: () => void controller.respondToApproval(run.id, request.id, "allow") }, icon("check"), "Allow")),
   );
+}
+
+function loadEffort(): EffortChoice {
+  try {
+    return localStorage.getItem(EFFORT_KEY) ?? DEFAULT_EFFORT;
+  } catch {
+    return DEFAULT_EFFORT;
+  }
+}
+
+function saveEffort(value: EffortChoice): void {
+  try {
+    localStorage.setItem(EFFORT_KEY, value);
+  } catch {
+    // A lost preference falls back to the model default next time.
+  }
 }
 
 function modelKey(model: ModelView): ModelChoice {

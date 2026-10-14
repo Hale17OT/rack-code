@@ -27,7 +27,7 @@ import type {
   SessionSummaryView,
   SessionView,
   JournalEntryView,
-  WorkspaceView,
+  ProjectView,
 } from "../../contracts/desktop/index.js";
 
 /** A run the host is executing, as mirrored by this renderer. */
@@ -59,18 +59,20 @@ export interface AppState {
   /** Unified model catalog; each entry carries hidden host routing metadata. */
   readonly models: readonly ModelView[];
   readonly modelCatalogFailures: readonly { readonly providerName: string; readonly accountId: string }[];
-  /** Top-level workspaces rendered by the navigator. */
-  readonly workspaces: readonly WorkspaceView[];
+  /** Top-level projects rendered by the navigator. */
+  readonly projects: readonly ProjectView[];
   /** Sessions of every project, grouped by project in the sidebar. */
   readonly sessions: readonly SessionSummaryView[];
   readonly selection: {
-    readonly workspaceId?: string | undefined;
+    readonly projectId?: string | undefined;
     readonly sessionId?: string | undefined;
     readonly runId?: string | undefined;
   };
   /** The selected session's full record and persisted runs. */
   readonly session?: SessionView | undefined;
   readonly runs: readonly RunView[];
+  /** Persisted/current-session activity, retained when a live run finishes. */
+  readonly transcripts: Readonly<Record<string, readonly RuntimeEvent[]>>;
   /** Every run the host is executing, across sessions, keyed by run ID. */
   readonly live: Readonly<Record<string, LiveRun>>;
   /** Journal of the run open in the detail panel. */
@@ -97,10 +99,11 @@ export const INITIAL_STATE: AppState = {
   runtimes: [],
   models: [],
   modelCatalogFailures: [],
-  workspaces: [],
+  projects: [],
   sessions: [],
   selection: {},
   runs: [],
+  transcripts: {},
   live: {},
   capabilities: {},
   settings: { open: false, section: "general" },

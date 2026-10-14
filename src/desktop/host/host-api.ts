@@ -8,8 +8,8 @@
  *
  * Responsibilities kept here (and not in the renderer):
  * - stripping credential references and runtime-context IDs from accounts;
- * - refusing to start a run on a shared workspace that already has a writer,
- *   so the UI gets `workspace_busy` with the owning attempt instead of a
+ * - refusing to start a run on a shared project that already has a writer,
+ *   so the UI gets `project_busy` with the owning attempt instead of a
  *   failed run (the core lock remains the authoritative guard);
  * - reporting whether the Accounts service fell back from the selected
  *   account when the caller did not name one.
@@ -19,9 +19,10 @@ import type { AccountsService } from "../../core/accounts/service.js";
 import type { ExecutionService } from "../../core/execution/service.js";
 import type { RuntimeRegistry } from "../../core/execution/runtime-registry.js";
 import type { RunRecord } from "../../core/execution/types.js";
-import type { WorkspacesService } from "../../core/workspaces/service.js";
+import type { ProjectsService } from "../../core/projects/service.js";
 import type { ConnectionsService } from "../../core/connections/service.js";
 import type { SessionsService } from "../../core/sessions/service.js";
+import type { SessionImportsService } from "../../core/session-imports/service.js";
 import {
   isHostCommand,
   validateCommandParams,
@@ -44,8 +45,9 @@ import { HostOperationError, toHostError } from "./errors.js";
 /** The application services the host needs; satisfied by `createApplication`. */
 export interface HostApplication {
   readonly accounts: AccountsService;
-  readonly workspaces: WorkspacesService;
+  readonly projects: ProjectsService;
   readonly sessions: SessionsService;
+  readonly sessionImports: SessionImportsService;
   readonly execution: ExecutionService;
   readonly connections: ConnectionsService;
   readonly runtimes: RuntimeRegistry;
@@ -97,8 +99,10 @@ export class HostApi {
   }
 
   private createHandlers(): Handlers {
-    const { accounts, workspaces, sessions, execution, runtimes, connections } = this.app;
+    const { accounts, projects, sessions, sessionImports, execution, runtimes, connections } = this.app;
     return {
+      "projects.changes": async (params) => projects.getChanges(params.projectId, params.repositoryPath),
+      "projects.repositories": async ({ projectId, ...options }) => projects.discoverRepositories(projectId, options),
       "auth.providers": async () => connections.providers(),
       "auth.connect": async (params) => connections.connect(params),
       "auth.submitCode": async (params) => {
@@ -139,31 +143,48 @@ export class HostApi {
         return this.accountView(account);
       },
 
-      "workspaces.list": async () => workspaces.listWorkspaces(),
-      "workspaces.create": async (params) => {
-        const workspace = await workspaces.createWorkspace(params);
-        this.emit({ type: "workspaces.changed" });
-        return workspace;
+      "projects.list": async () => projects.listProjects(),
+      "projects.create": async (params) => {
+        const project = await projects.createProject(params);
+        this.emit({ type: "projects.changed" });
+        return project;
       },
 
-      "sessions.list": async (params) => (await sessions.list(params.workspaceId)).map(
+      "sessions.list": async (params) => {
+        const projectId = params.projectId === undefined ? undefined : (await projects.getProject(params.projectId)).id;
+        return (await sessions.list(projectId)).map(
         (session): SessionSummaryView => ({
           id: session.id,
-          workspaceId: session.workspaceId,
+          projectId: session.projectId,
           ...(session.title === undefined ? {} : { title: session.title }),
           messageCount: session.messages.length,
           createdAt: session.createdAt,
           updatedAt: session.updatedAt,
         }),
-      ),
+        );
+      },
       "sessions.create": async (params) => {
-        // Validate the workspace before persisting the session.
-        await workspaces.getWorkspace(params.workspaceId);
-        const session = await sessions.create(params);
-        this.emit({ type: "sessions.changed", workspaceId: session.workspaceId, sessionId: session.id });
+        // Validate the project before persisting the session.
+        const project = await projects.getProject(params.projectId);
+        const session = await sessions.create({ ...params, projectId: project.id });
+        this.emit({ type: "sessions.changed", projectId: session.projectId, sessionId: session.id });
         return session;
       },
       "sessions.get": async (params) => sessions.get(params.sessionId),
+      "sessions.discover": async (params) => sessionImports.discover(params.projectId),
+      "sessions.previewImport": async (params) => {
+        const snapshot = await sessionImports.preview(params.projectId, params.sourceId, params.nativeSessionId);
+        // Preview the latest visible conversation with bounded transport data.
+        // Import itself re-reads and saves the complete snapshot.
+        return { ...snapshot, messages: snapshot.messages.filter((message) => message.role === "user" || message.role === "assistant").slice(-12).map((message) => ({
+          ...message, content: message.content.slice(0, 4000),
+        })) };
+      },
+      "sessions.import": async (params) => {
+        const result = await sessionImports.import(params.projectId, params.sourceId, params.nativeSessionId);
+        this.emit({ type: "sessions.changed", projectId: result.session.projectId, sessionId: result.session.id });
+        return result;
+      },
 
       "runtimes.list": async () => runtimes.list().map((runtimeId) => {
         const runtime = runtimes.get(runtimeId);
@@ -173,13 +194,13 @@ export class HostApi {
         return { runtimeId, ...(runtime.providerId === undefined ? {} : { providerId: runtime.providerId }), permissionMappings };
       }),
       "models.list": async (params) => {
-        // Discovery runs in the selected workspace when one is available so
+        // Discovery runs in the selected project when one is available so
         // providers see the same working directory that a subsequent run
         // will use. The catalog remains account-scoped and never receives
         // renderer credentials or provider SDK objects.
-        const workspacePath = params.workspaceId === undefined
+        const projectPath = params.projectId === undefined
           ? undefined
-          : (await workspaces.getWorkspace(params.workspaceId)).path;
+          : (await projects.getProject(params.projectId)).path;
         const providerNames = new Map(connections.providers().map((provider) => [provider.providerId, provider.displayName]));
         const accountsByProvider = new Map<string, AccountRecord[]>();
         for (const account of await accounts.list()) {
@@ -196,7 +217,7 @@ export class HostApi {
             try {
               const entries = await runtime.models({
                 account: { accountId: account.id, providerId: account.providerId, credential: account.credential, runtimeContextId: account.runtimeContextId },
-                ...(workspacePath === undefined ? {} : { workspacePath }),
+                ...(projectPath === undefined ? {} : { projectPath }),
               });
               for (const model of entries) {
                 const key = `${runtimeId}|${model.providerId}|${model.id}`;
@@ -227,12 +248,12 @@ export class HostApi {
       },
 
       "runs.start": async (params) => {
-        const workspace = await workspaces.getWorkspace(params.workspaceId);
-        if (workspace.activeWriterAttemptId !== undefined) {
+        const project = await projects.getProject(params.projectId);
+        if (project.activeWriterAttemptId !== undefined) {
           throw new HostOperationError(
-            "workspace_busy",
-            `Workspace '${workspace.id}' is already being edited by attempt '${workspace.activeWriterAttemptId}'.`,
-            { workspaceId: workspace.id, attemptId: workspace.activeWriterAttemptId },
+            "project_busy",
+            `Project '${project.id}' is already being edited by attempt '${project.activeWriterAttemptId}'.`,
+            { projectId: project.id, attemptId: project.activeWriterAttemptId },
           );
         }
         // Read the selection before starting so a fallback can be reported.

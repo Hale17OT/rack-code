@@ -23,6 +23,12 @@ export class ContractValidationError extends Error {
 /** Parses an unknown value into `T` or throws `ContractValidationError`. */
 export type Validator<T> = (value: unknown, path: string) => T;
 
+/** Boolean flags accept no coercion from strings or numbers. */
+export const boolean: Validator<boolean> = (value, path) => {
+  if (typeof value !== "boolean") throw new ContractValidationError(path, "expected a boolean");
+  return value;
+};
+
 /** A non-empty, trimmed-length-checked string. */
 export function text(options: { readonly maxLength?: number; readonly allowEmpty?: boolean } = {}): Validator<string> {
   const maxLength = options.maxLength ?? 4096;
