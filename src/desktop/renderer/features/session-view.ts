@@ -137,7 +137,7 @@ function renderTranscript(
 ): Node[] {
   const session = state.session;
   if (session === undefined || state.selection.sessionId === undefined) {
-    return [placeholder("chat-circle-text", "No session selected", "Open a session from the sidebar, or start one with the + on a project folder.")];
+    return [placeholder("chat-circle-text", "No session selected", "Add a workspace folder, then use its + button to start a session.")];
   }
 
   // Live runs of this session that the persisted list does not contain yet.

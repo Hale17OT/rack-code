@@ -103,7 +103,6 @@ export interface RuntimeAdapter {
 export interface RunRecord {
   readonly id: RunId;
   readonly sessionId: string;
-  readonly projectId: string;
   readonly workspaceId: string;
   readonly prompt: string;
   readonly providerId: string;

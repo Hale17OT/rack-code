@@ -13,8 +13,8 @@ import type {
   RuntimeEvent,
   RuntimeRunInput,
 } from "./types.js";
-import { InMemoryProjectStore } from "../projects/in-memory-store.js";
-import { ProjectsService } from "../projects/service.js";
+import { InMemoryWorkspaceStore } from "../workspaces/in-memory-store.js";
+import { WorkspacesService } from "../workspaces/service.js";
 import { InMemorySessionStore } from "../sessions/in-memory-store.js";
 import { SessionsService } from "../sessions/service.js";
 
@@ -87,14 +87,14 @@ class NoTerminalRuntime extends FakeRuntime {
 function setup() {
   const now = () => new Date("2026-10-12T00:00:00.000Z");
   const accounts = new AccountsService(new InMemoryAccountStore(), { now });
-  const projects = new ProjectsService(new InMemoryProjectStore(), { now });
+  const workspaces = new WorkspacesService(new InMemoryWorkspaceStore(), { now });
   const sessions = new SessionsService(new InMemorySessionStore(), { now });
   const executions = new InMemoryExecutionStore();
   const runtimes = new RuntimeRegistry();
   const runtime = new FakeRuntime();
   runtimes.register(runtime);
-  const service = new ExecutionService(executions, accounts, sessions, projects, runtimes, { now });
-  return { accounts, projects, sessions, executions, runtime, service };
+  const service = new ExecutionService(executions, accounts, sessions, workspaces, runtimes, { now });
+  return { accounts, workspaces, sessions, executions, runtime, service };
 }
 
 async function createFixture() {
@@ -107,29 +107,21 @@ async function createFixture() {
     runtimeContextId: "runtime-context-1",
     availability: "available",
   });
-  const project = await fixture.projects.createProject({
-    id: "project-1",
-    name: "Example",
-    rootPath: "/tmp/example",
-  });
-  const workspace = await fixture.projects.createWorkspace({
+  const workspace = await fixture.workspaces.createWorkspace({
     id: "workspace-1",
-    projectId: project.id,
     path: "/tmp/example",
   });
   const session = await fixture.sessions.create({
     id: "session-1",
-    projectId: project.id,
     workspaceId: workspace.id,
   });
-  return { ...fixture, account, project, workspace, session };
+  return { ...fixture, account, workspace, session };
 }
 
 test("executes a run end to end, persists transcript and journal, and releases the workspace", async () => {
   const fixture = await createFixture();
   const handle = await fixture.service.start({
     sessionId: fixture.session.id,
-    projectId: fixture.project.id,
     workspaceId: fixture.workspace.id,
     providerId: "fake",
     runtimeId: fixture.runtime.runtimeId,
@@ -161,7 +153,7 @@ test("executes a run end to end, persists transcript and journal, and releases t
   assert.equal(run.result, "done");
   assert.deepEqual(events.map((event) => event.type), ["tool_result", "message_delta", "completed"]);
   assert.equal((await fixture.sessions.get(fixture.session.id)).messages.length, 2);
-  assert.equal((await fixture.projects.getWorkspace(fixture.workspace.id)).activeWriterAttemptId, undefined);
+  assert.equal((await fixture.workspaces.getWorkspace(fixture.workspace.id)).activeWriterAttemptId, undefined);
   const journal = await fixture.executions.listJournal(run.id);
   assert.ok(journal.some((entry) => entry.type === "approval_request"));
   assert.equal(fixture.runtime.started.length, 1);
@@ -171,7 +163,6 @@ test("uses the application continuation when the same session resumes on the run
   const fixture = await createFixture();
   const first = await fixture.service.start({
     sessionId: fixture.session.id,
-    projectId: fixture.project.id,
     workspaceId: fixture.workspace.id,
     providerId: "fake",
     runtimeId: fixture.runtime.runtimeId,
@@ -190,7 +181,6 @@ test("uses the application continuation when the same session resumes on the run
 
   const second = await fixture.service.start({
     sessionId: fixture.session.id,
-    projectId: fixture.project.id,
     workspaceId: fixture.workspace.id,
     providerId: "fake",
     runtimeId: fixture.runtime.runtimeId,
@@ -216,12 +206,11 @@ test("cancellation interrupts the attempt and releases the workspace", async () 
     fixture.executions,
     fixture.accounts,
     fixture.sessions,
-    fixture.projects,
+    fixture.workspaces,
     runtimes,
   );
   const handle = await service.start({
     sessionId: fixture.session.id,
-    projectId: fixture.project.id,
     workspaceId: fixture.workspace.id,
     providerId: "fake",
     runtimeId: blocking.runtimeId,
@@ -232,7 +221,7 @@ test("cancellation interrupts the attempt and releases the workspace", async () 
   const run = await handle.completed;
 
   assert.equal(run.status, "interrupted");
-  assert.equal((await fixture.projects.getWorkspace(fixture.workspace.id)).activeWriterAttemptId, undefined);
+  assert.equal((await fixture.workspaces.getWorkspace(fixture.workspace.id)).activeWriterAttemptId, undefined);
 });
 
 test("records the eligible fallback account on a new attempt", async () => {
@@ -252,7 +241,6 @@ test("records the eligible fallback account on a new attempt", async () => {
 
   const handle = await fixture.service.start({
     sessionId: fixture.session.id,
-    projectId: fixture.project.id,
     workspaceId: fixture.workspace.id,
     providerId: "fake",
     runtimeId: fixture.runtime.runtimeId,
@@ -282,12 +270,11 @@ test("marks a provider stream without a terminal event as unknown", async () => 
     fixture.executions,
     fixture.accounts,
     fixture.sessions,
-    fixture.projects,
+    fixture.workspaces,
     runtimes,
   );
   const handle = await service.start({
     sessionId: fixture.session.id,
-    projectId: fixture.project.id,
     workspaceId: fixture.workspace.id,
     providerId: "fake",
     runtimeId: runtime.runtimeId,

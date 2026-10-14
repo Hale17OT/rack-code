@@ -1,5 +1,12 @@
 # Change log
 
+## 2026-10-13 - Unify workspace navigation and remove setup text fields
+
+- Replaced the separate project tree and workspace list with one workspace folder tree. Sessions nest beneath their workspace, and the workspace plus button creates a session immediately with a generated title.
+- Workspace creation now uses only the native folder picker. The selected folder supplies the project name and shared workspace path, so project, workspace, path, starting-revision, and session-title input boxes are absent from the setup flow.
+- Loaded workspaces across all projects for the unified navigator and improved sidebar row/button padding for clearer click targets.
+- Validation performed: `npm run check` (41 tests), plus `git diff --check`. The local Electron app was launched from `dev` and the unified workspace tree rendered without setup input fields.
+
 ## 2026-10-13 - Restore the chat transcript after the model picker merge
 
 - The merge of the model picker branch (`0b131ec`) resolved the renderer conflicts in favor of that branch, which predated the chat transcript, so the session view and its styles fell back to run cards. Reapplied the chat transcript (prompt bubbles, Markdown replies, meta row, tool rows, turn navigator, "Scroll to end") on top of the merged state.

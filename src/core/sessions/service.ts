@@ -29,13 +29,12 @@ export class SessionsService {
   }
 
   async create(input: CreateSessionInput): Promise<SessionRecord> {
-    if (input.projectId.trim() === "" || input.workspaceId.trim() === "") {
-      throw new InvalidSessionError("Project and workspace IDs are required.");
+    if (input.workspaceId.trim() === "") {
+      throw new InvalidSessionError("Workspace ID is required.");
     }
     const timestamp = this.now().toISOString();
     const session: SessionRecord = {
       id: input.id ?? this.createId(),
-      projectId: input.projectId,
       workspaceId: input.workspaceId,
       messages: [],
       continuations: [],
@@ -56,13 +55,13 @@ export class SessionsService {
   }
 
   /**
-   * Lists sessions, optionally restricted to one project, most recently
+   * Lists sessions, optionally restricted to one workspace, most recently
    * updated first so navigators show active conversations at the top.
    */
-  async list(projectId?: string): Promise<readonly SessionRecord[]> {
+  async list(workspaceId?: string): Promise<readonly SessionRecord[]> {
     const sessions = await this.store.list();
     return sessions
-      .filter((session) => projectId === undefined || session.projectId === projectId)
+      .filter((session) => workspaceId === undefined || session.workspaceId === workspaceId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 

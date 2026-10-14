@@ -10,7 +10,7 @@ import { ClaudeRuntimeAdapter } from "../adapters/runtimes/claude.js";
 import { CodexRuntimeAdapter } from "../adapters/runtimes/codex.js";
 import { JsonAccountStore } from "../adapters/storage/json-account-store.js";
 import { JsonExecutionStore } from "../adapters/storage/json-execution-store.js";
-import { JsonProjectStore } from "../adapters/storage/json-project-store.js";
+import { JsonWorkspaceStore } from "../adapters/storage/json-workspace-store.js";
 import { JsonSessionStore } from "../adapters/storage/json-session-store.js";
 import type {
   CredentialResolver,
@@ -21,12 +21,12 @@ import type { AccountConnector } from "../core/connections/ports.js";
 import { ConnectionsService } from "../core/connections/service.js";
 import { ExecutionService } from "../core/execution/service.js";
 import { RuntimeRegistry } from "../core/execution/runtime-registry.js";
-import { ProjectsService } from "../core/projects/service.js";
+import { WorkspacesService } from "../core/workspaces/service.js";
 import { SessionsService } from "../core/sessions/service.js";
 
 export interface Application {
   readonly accounts: AccountsService;
-  readonly projects: ProjectsService;
+  readonly workspaces: WorkspacesService;
   readonly sessions: SessionsService;
   readonly execution: ExecutionService;
   readonly connections: ConnectionsService;
@@ -65,7 +65,7 @@ export function createApplication(options: CreateApplicationOptions = {}): Appli
   );
 
   const accounts = new AccountsService(new JsonAccountStore(join(dataDirectory, "accounts.json")));
-  const projects = new ProjectsService(new JsonProjectStore(join(dataDirectory, "projects.json")));
+  const workspaces = new WorkspacesService(new JsonWorkspaceStore(join(dataDirectory, "workspaces.json"), join(dataDirectory, "projects.json")));
   const sessions = new SessionsService(new JsonSessionStore(join(dataDirectory, "sessions.json")));
   const executionStore = new JsonExecutionStore(join(dataDirectory, "execution.json"));
   const runtimes = new RuntimeRegistry();
@@ -75,7 +75,7 @@ export function createApplication(options: CreateApplicationOptions = {}): Appli
     executionStore,
     accounts,
     sessions,
-    projects,
+    workspaces,
     runtimes,
   );
 
@@ -88,7 +88,7 @@ export function createApplication(options: CreateApplicationOptions = {}): Appli
   return {
     accounts,
     connections,
-    projects,
+    workspaces,
     sessions,
     execution,
     runtimes,

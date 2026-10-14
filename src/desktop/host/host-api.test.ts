@@ -15,8 +15,8 @@ import type {
   RuntimeModelInput,
   RuntimeRunInput,
 } from "../../core/execution/types.js";
-import { InMemoryProjectStore } from "../../core/projects/in-memory-store.js";
-import { ProjectsService } from "../../core/projects/service.js";
+import { InMemoryWorkspaceStore } from "../../core/workspaces/in-memory-store.js";
+import { WorkspacesService } from "../../core/workspaces/service.js";
 import { InMemorySessionStore } from "../../core/sessions/in-memory-store.js";
 import { SessionsService } from "../../core/sessions/service.js";
 import type { CommandResponse, HostEvent } from "../../contracts/desktop/index.js";
@@ -112,12 +112,12 @@ class FakeConnector implements AccountConnector {
 
 async function setup() {
   const accounts = new AccountsService(new InMemoryAccountStore());
-  const projects = new ProjectsService(new InMemoryProjectStore());
+  const workspaces = new WorkspacesService(new InMemoryWorkspaceStore());
   const sessions = new SessionsService(new InMemorySessionStore());
   const runtimes = new RuntimeRegistry();
   runtimes.register(new ApprovalRuntime());
   runtimes.register(new BlockingRuntime());
-  const execution = new ExecutionService(new InMemoryExecutionStore(), accounts, sessions, projects, runtimes);
+  const execution = new ExecutionService(new InMemoryExecutionStore(), accounts, sessions, workspaces, runtimes);
   const connector = new FakeConnector();
   const connections = new ConnectionsService(
     accounts,
@@ -125,7 +125,7 @@ async function setup() {
     [connector],
   );
   const events: HostEvent[] = [];
-  const api = new HostApi({ accounts, projects, sessions, execution, runtimes, connections }, (event) => events.push(event));
+  const api = new HostApi({ accounts, workspaces, sessions, execution, runtimes, connections }, (event) => events.push(event));
 
   const call = async <T>(command: string, params: unknown = {}): Promise<T> => {
     const response = await api.dispatch(command, params);
@@ -135,16 +135,15 @@ async function setup() {
     return response.value as T;
   };
 
-  const project = await call<{ id: string }>("projects.create", { name: "demo", rootPath: "/tmp/demo" });
-  const workspace = await call<{ id: string }>("workspaces.create", { projectId: project.id, path: "/tmp/demo" });
-  const session = await call<{ id: string }>("sessions.create", { projectId: project.id, workspaceId: workspace.id });
+  const workspace = await call<{ id: string }>("workspaces.create", { path: "/tmp/demo" });
+  const session = await call<{ id: string }>("sessions.create", { workspaceId: workspace.id });
   const account = await call<{ id: string }>("accounts.register", {
     providerId: "fake",
     providerAccountId: "user-1",
     credential: { id: "cred-1", providerId: "fake", method: "token" },
     runtimeContextId: "ctx-1",
   });
-  return { api, call, events, accounts, connector, project, workspace, session, account };
+  return { api, call, events, accounts, connector, workspace, session, account };
 }
 
 function waitFor(events: HostEvent[], predicate: (event: HostEvent) => boolean): Promise<HostEvent> {
@@ -180,13 +179,13 @@ test("errors carry stable codes and structured details", async () => {
   assert.equal(!duplicate.ok && duplicate.error.code, "duplicate_account");
   assert.deepEqual(!duplicate.ok && duplicate.error.details, { providerId: "fake", providerAccountId: "user-1" });
 
-  const invalid = await api.dispatch("projects.create", { name: "", rootPath: "/x" });
+  const invalid = await api.dispatch("workspaces.create", { path: "" });
   assert.equal(!invalid.ok && invalid.error.code, "invalid_input");
 
-  const extra = await api.dispatch("projects.list", { unexpected: true });
+  const extra = await api.dispatch("workspaces.list", { unexpected: true });
   assert.equal(!extra.ok && extra.error.code, "invalid_input");
 
-  const unknown: CommandResponse = await api.dispatch("projects.drop", {});
+  const unknown: CommandResponse = await api.dispatch("workspaces.drop", {});
   assert.equal(!unknown.ok && unknown.error.code, "unknown_command");
 
   const missing = await api.dispatch("sessions.get", { sessionId: "nope" });
@@ -228,10 +227,9 @@ test("model catalog combines accounts and reports partial discovery failures", a
 });
 
 test("a run streams indexed events, parks approvals for any client, and finishes", async () => {
-  const { call, events, project, workspace, session, account } = await setup();
+  const { call, events, workspace, session, account } = await setup();
   const started = await call<{ run: { id: string } }>("runs.start", {
     sessionId: session.id,
-    projectId: project.id,
     workspaceId: workspace.id,
     providerId: "fake",
     runtimeId: "approval-runtime",
@@ -280,10 +278,9 @@ test("a run streams indexed events, parks approvals for any client, and finishes
 });
 
 test("starting on a busy workspace returns workspace_busy with the owning attempt", async () => {
-  const { api, call, events, project, workspace, session, account } = await setup();
+  const { api, call, events, workspace, session, account } = await setup();
   const params = {
     sessionId: session.id,
-    projectId: project.id,
     workspaceId: workspace.id,
     providerId: "fake",
     runtimeId: "blocking-runtime",
@@ -307,10 +304,9 @@ test("starting on a busy workspace returns workspace_busy with the owning attemp
 });
 
 test("shutdown cancels active runs and waits for terminal states", async () => {
-  const { api, call, events, project, workspace, session, account } = await setup();
+  const { api, call, events, workspace, session, account } = await setup();
   await call("runs.start", {
     sessionId: session.id,
-    projectId: project.id,
     workspaceId: workspace.id,
     providerId: "fake",
     runtimeId: "blocking-runtime",
@@ -324,7 +320,7 @@ test("shutdown cancels active runs and waits for terminal states", async () => {
 });
 
 test("an automatic account choice reports fallback from the selected account", async () => {
-  const { call, events, accounts, project, workspace, session, account } = await setup();
+  const { call, events, accounts, workspace, session, account } = await setup();
   const second = await call<{ id: string }>("accounts.register", {
     providerId: "fake",
     providerAccountId: "user-2",
@@ -337,7 +333,6 @@ test("an automatic account choice reports fallback from the selected account", a
 
   const started = await call<{ run: { id: string; accountId: string }; fallbackFromAccountId?: string }>("runs.start", {
     sessionId: session.id,
-    projectId: project.id,
     workspaceId: workspace.id,
     providerId: "fake",
     runtimeId: "blocking-runtime",

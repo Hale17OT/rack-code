@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { AccountsService } from "../accounts/service.js";
 import type { AccountRecord } from "../accounts/types.js";
-import type { ProjectsService } from "../projects/service.js";
+import type { WorkspacesService } from "../workspaces/service.js";
 import type { SessionsService } from "../sessions/service.js";
 import { AccountProviderMismatchError } from "../accounts/errors.js";
 import {
@@ -10,7 +10,6 @@ import {
   AttemptNotFoundError,
   NoEligibleAccountError,
   RunNotFoundError,
-  WorkspaceProjectMismatchError,
 } from "./errors.js";
 import type { ExecutionStore } from "./ports.js";
 import { AsyncQueue } from "../shared/async-queue.js";
@@ -28,7 +27,6 @@ import type {
 
 export interface StartRunInput {
   readonly sessionId: string;
-  readonly projectId: string;
   readonly workspaceId: string;
   readonly providerId: string;
   readonly runtimeId: string;
@@ -68,7 +66,7 @@ export class ExecutionService {
     private readonly store: ExecutionStore,
     private readonly accounts: AccountsService,
     private readonly sessions: SessionsService,
-    private readonly projects: ProjectsService,
+    private readonly workspaces: WorkspacesService,
     private readonly runtimes: RuntimeRegistry,
     options: ExecutionServiceOptions = {},
   ) {
@@ -78,10 +76,7 @@ export class ExecutionService {
 
   async start(input: StartRunInput): Promise<ExecutionHandle> {
     const account = await this.resolveAccount(input);
-    const workspace = await this.projects.getWorkspace(input.workspaceId);
-    if (workspace.projectId !== input.projectId) {
-      throw new WorkspaceProjectMismatchError(input.workspaceId, input.projectId);
-    }
+    const workspace = await this.workspaces.getWorkspace(input.workspaceId);
     const runtime = this.runtimes.get(input.runtimeId);
     const runId = this.createId();
     const attemptId = this.createId();
@@ -89,7 +84,6 @@ export class ExecutionService {
     const run: RunRecord = {
       id: runId,
       sessionId: input.sessionId,
-      projectId: input.projectId,
       workspaceId: input.workspaceId,
       prompt: input.prompt,
       providerId: input.providerId,
@@ -254,7 +248,7 @@ export class ExecutionService {
     let terminalError: string | undefined;
 
     try {
-      await this.projects.acquireWriter(input.workspaceId, attempt.id);
+      await this.workspaces.acquireWriter(input.workspaceId, attempt.id);
       currentRun = await this.updateRun(currentRun, "running");
       currentAttempt = await this.updateAttempt(currentAttempt, "running");
       onRun(currentRun);
@@ -362,7 +356,7 @@ export class ExecutionService {
     } finally {
       approvals.close();
       try {
-        await this.projects.releaseWriter(input.workspaceId, currentAttempt.id);
+        await this.workspaces.releaseWriter(input.workspaceId, currentAttempt.id);
       } catch {
         // Preserve the original run outcome; a stale lock is recoverable from
         // the workspace record and is surfaced by the next start attempt.

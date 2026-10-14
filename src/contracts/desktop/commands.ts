@@ -26,7 +26,6 @@ import {
   type ConnectView,
   type JournalEntryView,
   type PermissionMode,
-  type ProjectView,
   type RunView,
   type RuntimeCapabilities,
   type RuntimeView,
@@ -55,7 +54,6 @@ export interface RegisterAccountParams {
 
 export interface StartRunParams {
   readonly sessionId: string;
-  readonly projectId: string;
   readonly workspaceId: string;
   readonly providerId: string;
   readonly runtimeId: string;
@@ -88,22 +86,19 @@ export interface HostCommandMap {
   "auth.cancel": { params: { readonly connectId: string }; result: null };
   /** Sign-ins in progress, for clients that open mid-flow. */
   "auth.active": { params: NoParams; result: readonly ConnectView[] };
-  "projects.list": { params: NoParams; result: readonly ProjectView[] };
-  "projects.create": { params: { readonly name: string; readonly rootPath: string }; result: ProjectView };
-  "workspaces.list": { params: { readonly projectId: string }; result: readonly WorkspaceView[] };
+  "workspaces.list": { params: NoParams; result: readonly WorkspaceView[] };
   "workspaces.create": {
     params: {
-      readonly projectId: string;
       readonly path: string;
       readonly kind?: "shared" | "isolated";
       readonly startingRevision?: string;
     };
     result: WorkspaceView;
   };
-  /** Omit `projectId` to list sessions of every project (sidebar tree). */
-  "sessions.list": { params: { readonly projectId?: string }; result: readonly SessionSummaryView[] };
+  /** Omit `workspaceId` to list sessions from every workspace. */
+  "sessions.list": { params: { readonly workspaceId?: string }; result: readonly SessionSummaryView[] };
   "sessions.create": {
-    params: { readonly projectId: string; readonly workspaceId: string; readonly title?: string };
+    params: { readonly workspaceId: string; readonly title?: string };
     result: SessionView;
   };
   "sessions.get": { params: { readonly sessionId: string }; result: SessionView };
@@ -149,24 +144,20 @@ export const COMMAND_VALIDATORS: { readonly [C in HostCommand]: Validator<Comman
   "auth.submitCode": object({ connectId: id, code: text({ maxLength: 4096 }) }),
   "auth.cancel": object({ connectId: id }),
   "auth.active": empty,
-  "projects.list": empty,
-  "projects.create": object({ name: text({ maxLength: 256 }), rootPath: text() }),
-  "workspaces.list": object({ projectId: id }),
+  "workspaces.list": empty,
   "workspaces.create": object({
-    projectId: id,
     path: text(),
     kind: optional(oneOf(["shared", "isolated"])),
     startingRevision: optional(id),
   }),
-  "sessions.list": object({ projectId: optional(id) }),
-  "sessions.create": object({ projectId: id, workspaceId: id, title: optional(text({ maxLength: 256 })) }),
+  "sessions.list": object({ workspaceId: optional(id) }),
+  "sessions.create": object({ workspaceId: id, title: optional(text({ maxLength: 256 })) }),
   "sessions.get": object({ sessionId: id }),
   "runtimes.list": empty,
   "models.list": object({ workspaceId: optional(id) }),
   "runtimes.capabilities": object({ runtimeId: id, accountId: id }),
   "runs.start": object({
     sessionId: id,
-    projectId: id,
     workspaceId: id,
     providerId: id,
     runtimeId: id,

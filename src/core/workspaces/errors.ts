@@ -1,25 +1,18 @@
-export class ProjectError extends Error {
+export class WorkspaceError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "ProjectError";
+    this.name = "WorkspaceError";
   }
 }
 
-export class ProjectNotFoundError extends ProjectError {
-  constructor(projectId: string) {
-    super(`Project '${projectId}' was not found.`);
-    this.name = "ProjectNotFoundError";
-  }
-}
-
-export class WorkspaceNotFoundError extends ProjectError {
+export class WorkspaceNotFoundError extends WorkspaceError {
   constructor(workspaceId: string) {
     super(`Workspace '${workspaceId}' was not found.`);
     this.name = "WorkspaceNotFoundError";
   }
 }
 
-export class WorkspaceBusyError extends ProjectError {
+export class WorkspaceBusyError extends WorkspaceError {
   /** Exposed so clients can show the owning attempt without parsing text. */
   constructor(readonly workspaceId: string, readonly attemptId: string) {
     super(`Workspace '${workspaceId}' is already being edited by attempt '${attemptId}'.`);
@@ -27,9 +20,9 @@ export class WorkspaceBusyError extends ProjectError {
   }
 }
 
-export class InvalidProjectError extends ProjectError {
+export class InvalidWorkspaceError extends WorkspaceError {
   constructor(message: string) {
     super(message);
-    this.name = "InvalidProjectError";
+    this.name = "InvalidWorkspaceError";
   }
 }

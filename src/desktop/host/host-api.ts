@@ -19,7 +19,7 @@ import type { AccountsService } from "../../core/accounts/service.js";
 import type { ExecutionService } from "../../core/execution/service.js";
 import type { RuntimeRegistry } from "../../core/execution/runtime-registry.js";
 import type { RunRecord } from "../../core/execution/types.js";
-import type { ProjectsService } from "../../core/projects/service.js";
+import type { WorkspacesService } from "../../core/workspaces/service.js";
 import type { ConnectionsService } from "../../core/connections/service.js";
 import type { SessionsService } from "../../core/sessions/service.js";
 import {
@@ -44,7 +44,7 @@ import { HostOperationError, toHostError } from "./errors.js";
 /** The application services the host needs; satisfied by `createApplication`. */
 export interface HostApplication {
   readonly accounts: AccountsService;
-  readonly projects: ProjectsService;
+  readonly workspaces: WorkspacesService;
   readonly sessions: SessionsService;
   readonly execution: ExecutionService;
   readonly connections: ConnectionsService;
@@ -97,7 +97,7 @@ export class HostApi {
   }
 
   private createHandlers(): Handlers {
-    const { accounts, projects, sessions, execution, runtimes, connections } = this.app;
+    const { accounts, workspaces, sessions, execution, runtimes, connections } = this.app;
     return {
       "auth.providers": async () => connections.providers(),
       "auth.connect": async (params) => connections.connect(params),
@@ -139,23 +139,16 @@ export class HostApi {
         return this.accountView(account);
       },
 
-      "projects.list": async () => projects.listProjects(),
-      "projects.create": async (params) => {
-        const project = await projects.createProject(params);
-        this.emit({ type: "projects.changed" });
-        return project;
-      },
-      "workspaces.list": async (params) => projects.listWorkspaces(params.projectId),
+      "workspaces.list": async () => workspaces.listWorkspaces(),
       "workspaces.create": async (params) => {
-        const workspace = await projects.createWorkspace(params);
-        this.emit({ type: "workspaces.changed", projectId: workspace.projectId });
+        const workspace = await workspaces.createWorkspace(params);
+        this.emit({ type: "workspaces.changed" });
         return workspace;
       },
 
-      "sessions.list": async (params) => (await sessions.list(params.projectId)).map(
+      "sessions.list": async (params) => (await sessions.list(params.workspaceId)).map(
         (session): SessionSummaryView => ({
           id: session.id,
-          projectId: session.projectId,
           workspaceId: session.workspaceId,
           ...(session.title === undefined ? {} : { title: session.title }),
           messageCount: session.messages.length,
@@ -164,17 +157,10 @@ export class HostApi {
         }),
       ),
       "sessions.create": async (params) => {
-        // Validate references up front so a session cannot point at a
-        // workspace from another project.
-        const workspace = await projects.getWorkspace(params.workspaceId);
-        if (workspace.projectId !== params.projectId) {
-          throw new HostOperationError(
-            "workspace_project_mismatch",
-            `Workspace '${params.workspaceId}' does not belong to project '${params.projectId}'.`,
-          );
-        }
+        // Validate the workspace before persisting the session.
+        await workspaces.getWorkspace(params.workspaceId);
         const session = await sessions.create(params);
-        this.emit({ type: "sessions.changed", projectId: session.projectId, sessionId: session.id });
+        this.emit({ type: "sessions.changed", workspaceId: session.workspaceId, sessionId: session.id });
         return session;
       },
       "sessions.get": async (params) => sessions.get(params.sessionId),
@@ -193,7 +179,7 @@ export class HostApi {
         // renderer credentials or provider SDK objects.
         const workspacePath = params.workspaceId === undefined
           ? undefined
-          : (await projects.getWorkspace(params.workspaceId)).path;
+          : (await workspaces.getWorkspace(params.workspaceId)).path;
         const providerNames = new Map(connections.providers().map((provider) => [provider.providerId, provider.displayName]));
         const accountsByProvider = new Map<string, AccountRecord[]>();
         for (const account of await accounts.list()) {
@@ -241,7 +227,7 @@ export class HostApi {
       },
 
       "runs.start": async (params) => {
-        const workspace = await projects.getWorkspace(params.workspaceId);
+        const workspace = await workspaces.getWorkspace(params.workspaceId);
         if (workspace.activeWriterAttemptId !== undefined) {
           throw new HostOperationError(
             "workspace_busy",

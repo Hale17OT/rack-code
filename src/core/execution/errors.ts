@@ -43,9 +43,3 @@ export class NoEligibleAccountError extends ExecutionError {
 }
 
 /** Raised when a run names a workspace that belongs to a different project. */
-export class WorkspaceProjectMismatchError extends ExecutionError {
-  constructor(workspaceId: string, projectId: string) {
-    super(`Workspace '${workspaceId}' does not belong to project '${projectId}'.`);
-    this.name = "WorkspaceProjectMismatchError";
-  }
-}

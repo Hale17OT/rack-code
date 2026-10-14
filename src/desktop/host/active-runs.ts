@@ -25,7 +25,6 @@ import { HostOperationError } from "./errors.js";
 
 interface ActiveRun {
   readonly handle: ExecutionHandle;
-  readonly projectId: string;
   readonly sessionId: string;
   run: RunView;
   readonly events: RuntimeEvent[];
@@ -56,7 +55,6 @@ export class ActiveRuns {
   track(handle: ExecutionHandle, run: RunView, fallbackFromAccountId?: string): void {
     const active: ActiveRun = {
       handle,
-      projectId: run.projectId,
       sessionId: run.sessionId,
       run,
       events: [],
@@ -163,8 +161,8 @@ export class ActiveRuns {
           // By the first event the service has taken the workspace writer
           // lock and marked the run running; refresh both for clients.
           await this.refresh(active);
-          emit({ type: "workspaces.changed", projectId: active.projectId });
-          emit({ type: "sessions.changed", projectId: active.projectId, sessionId: active.sessionId });
+          emit({ type: "workspaces.changed" });
+          emit({ type: "sessions.changed", workspaceId: active.run.workspaceId, sessionId: active.sessionId });
         }
         if (event.type === "availability") {
           emit({ type: "accounts.changed" });
@@ -187,8 +185,8 @@ export class ActiveRuns {
     this.runs.delete(runId);
     emit({ type: "run.finished", run: finished });
     emit({ type: "accounts.changed" });
-    emit({ type: "workspaces.changed", projectId: active.projectId });
-    emit({ type: "sessions.changed", projectId: active.projectId, sessionId: active.sessionId });
+    emit({ type: "workspaces.changed" });
+    emit({ type: "sessions.changed", workspaceId: active.run.workspaceId, sessionId: active.sessionId });
   }
 
   private async refresh(active: ActiveRun): Promise<void> {

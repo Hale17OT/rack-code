@@ -18,14 +18,12 @@ import {
   NoEligibleAccountError,
   RunNotFoundError,
   RuntimeNotFoundError,
-  WorkspaceProjectMismatchError,
 } from "../../core/execution/errors.js";
 import {
-  InvalidProjectError,
-  ProjectNotFoundError,
+  InvalidWorkspaceError,
   WorkspaceBusyError,
   WorkspaceNotFoundError,
-} from "../../core/projects/errors.js";
+} from "../../core/workspaces/errors.js";
 import { InvalidSessionError, SessionNotFoundError } from "../../core/sessions/errors.js";
 import { ConnectNotFoundError, ConnectorNotFoundError } from "../../core/connections/errors.js";
 import type { HostErrorCode, HostErrorPayload } from "../../contracts/desktop/errors.js";
@@ -72,7 +70,7 @@ function codeFor(error: Error): HostErrorCode {
   if (
     error instanceof ContractValidationError ||
     error instanceof InvalidAccountError ||
-    error instanceof InvalidProjectError ||
+    error instanceof InvalidWorkspaceError ||
     error instanceof InvalidSessionError
   ) {
     return "invalid_input";
@@ -80,9 +78,7 @@ function codeFor(error: Error): HostErrorCode {
   if (error instanceof AccountProviderMismatchError) return "provider_mismatch";
   if (error instanceof AccountNotFoundError) return "account_not_found";
   if (error instanceof NoEligibleAccountError) return "no_eligible_account";
-  if (error instanceof ProjectNotFoundError) return "project_not_found";
   if (error instanceof WorkspaceNotFoundError) return "workspace_not_found";
-  if (error instanceof WorkspaceProjectMismatchError) return "workspace_project_mismatch";
   if (error instanceof SessionNotFoundError) return "session_not_found";
   if (error instanceof RuntimeNotFoundError) return "runtime_not_found";
   if (error instanceof RunNotFoundError) return "run_not_found";

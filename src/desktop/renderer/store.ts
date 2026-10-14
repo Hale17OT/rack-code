@@ -19,7 +19,6 @@ import type {
   ConnectProviderView,
   ConnectView,
   HostErrorCode,
-  ProjectView,
   RunView,
   RuntimeCapabilities,
   RuntimeEvent,
@@ -60,13 +59,12 @@ export interface AppState {
   /** Unified model catalog; each entry carries hidden host routing metadata. */
   readonly models: readonly ModelView[];
   readonly modelCatalogFailures: readonly { readonly providerName: string; readonly accountId: string }[];
-  readonly projects: readonly ProjectView[];
-  /** Workspaces of the selected project. */
+  /** Top-level workspaces rendered by the navigator. */
   readonly workspaces: readonly WorkspaceView[];
   /** Sessions of every project, grouped by project in the sidebar. */
   readonly sessions: readonly SessionSummaryView[];
   readonly selection: {
-    readonly projectId?: string | undefined;
+    readonly workspaceId?: string | undefined;
     readonly sessionId?: string | undefined;
     readonly runId?: string | undefined;
   };
@@ -99,7 +97,6 @@ export const INITIAL_STATE: AppState = {
   runtimes: [],
   models: [],
   modelCatalogFailures: [],
-  projects: [],
   workspaces: [],
   sessions: [],
   selection: {},

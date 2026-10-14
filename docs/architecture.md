@@ -71,6 +71,11 @@ Proposed ownership:
 | Retrospective | Post-run analysis and environment observations with provenance and validity | Contributes guidance through an explicit optional input; execution works without it |
 | Orchestration | User-defined workflows and stage assignments across models/providers | Calls the same execution services used by a single interactive run |
 
+The desktop presentation merges project roots and workspaces into one folder
+navigator so users choose a working directory once. The core keeps project and
+workspace records separate because sessions belong to projects while execution
+locks, paths, and provenance belong to workspaces.
+
 The first six rows describe the implemented foundational modules. Connections sits above Accounts and Authentication so the dependency graph stays acyclic: Accounts depends on Authentication's credential types, and Connections depends on both.
 
 Connected accounts use the `native_login` credential method: the provider keeps the credential in its own login store scoped to the account's private runtime-context directory (`auth.json` under `CODEX_HOME`, or the macOS Keychain entry keyed to `CLAUDE_CONFIG_DIR`). The app records only the opaque reference, and `NativeLoginCredentialResolver` resolves it to an empty environment because the runtime adapters already point the provider at that directory. Credential material therefore never passes through application code or records. Timeline, retrospective, and orchestration are optional modules maintained and shipped by the product owner, with on/off controls in settings. Third-party installation is not the intended meaning of optional. Specific adapter boundaries may emerge as integrations are validated.

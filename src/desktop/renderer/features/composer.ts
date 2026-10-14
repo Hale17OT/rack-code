@@ -105,7 +105,7 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
     submitting = true;
     refresh(state);
     const ok = await controller.startRun({
-      sessionId: session.id, projectId: session.projectId, workspaceId: session.workspaceId,
+      sessionId: session.id, workspaceId: session.workspaceId,
       runtimeId: selected.runtimeId, providerId: selected.providerId,
       ...(choice.accountId === undefined ? {} : { accountId: choice.accountId }),
       ...(selected.modelId === "default" ? {} : { model: selected.modelId }),

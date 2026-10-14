@@ -18,7 +18,6 @@ export interface NativeContinuationReference {
 
 export interface SessionRecord {
   readonly id: SessionId;
-  readonly projectId: string;
   readonly workspaceId: string;
   readonly title?: string;
   readonly messages: readonly SessionMessage[];
@@ -29,7 +28,6 @@ export interface SessionRecord {
 
 export interface CreateSessionInput {
   readonly id?: SessionId;
-  readonly projectId: string;
   readonly workspaceId: string;
   readonly title?: string;
 }

@@ -12,10 +12,10 @@ test("only declared commands are accepted", () => {
 });
 
 test("parameters are validated, optional keys are omitted, and extra keys rejected", () => {
-  const params = validateCommandParams("workspaces.create", { projectId: "p", path: "/x", startingRevision: undefined });
-  assert.deepEqual(params, { projectId: "p", path: "/x" });
+  const params = validateCommandParams("workspaces.create", { path: "/x", startingRevision: undefined });
+  assert.deepEqual(params, { path: "/x" });
 
-  assert.throws(() => validateCommandParams("workspaces.create", { projectId: "p", path: "/x", kind: "other" }), ContractValidationError);
+  assert.throws(() => validateCommandParams("workspaces.create", { path: "/x", kind: "other" }), ContractValidationError);
   assert.throws(() => validateCommandParams("runs.cancel", { runId: "r", extra: 1 }), /runs?|extra/);
   assert.throws(() => validateCommandParams("runs.start", null), ContractValidationError);
   assert.throws(
