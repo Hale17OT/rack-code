@@ -1,0 +1,123 @@
+/** xterm is kept attached to its own context container. Re-rendering chat or
+ * switching surfaces never restarts the shell or replaces terminal output.
+ */
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import type { Controller } from "../controller.js";
+import type { Store } from "../store.js";
+import { h, replace } from "../dom.js";
+import type { TerminalSnapshot } from "../../../features/terminal/types.js";
+
+interface Client { terminal: Terminal; fit: FitAddon; element: HTMLElement; id: string; offset: number; exited: boolean; backend: string; writes: Promise<unknown>; opened: boolean; exitCode?: number }
+export function createTerminalPanel(store: Store, controller: Controller, isVisible: () => boolean) {
+  let active = false; let generation = 0; let loading = false; let reading = false;
+  let selected: string | undefined; let current: Client | undefined;
+  const clients = new Map<string, Client>();
+  const status = h("span", { class: "terminal-status" });
+  const error = h("p", { class: "panel-error", role: "alert" });
+  const viewport = h("div", { class: "terminal-viewport" });
+  viewport.addEventListener("keydown", (event) => event.stopPropagation());
+  const restart = h("button", { class: "button button-small", type: "button", onClick: () => void open(true) }, "New shell");
+  const close = h("button", { class: "button button-small", type: "button", onClick: () => void closeCurrent() }, "Close");
+  const element = h("div", { class: "terminal-panel" }, h("div", { class: "terminal-toolbar" }, status, restart, close), error, viewport);
+
+  function renderStatus(): void { status.textContent = loading ? "Opening shell…" : current === undefined ? "Project terminal" : `${current.backend}${current.exited ? ` · Exited${current.exitCode === undefined ? "" : ` (${current.exitCode})`}` : ""}`; restart.disabled = loading || store.get().selection.projectId === undefined; close.disabled = loading || current === undefined; }
+  function fit(): void {
+    if (!active || !isVisible() || current === undefined || viewport.clientWidth === 0 || viewport.clientHeight === 0) return;
+    const client = current;
+    client.fit.fit();
+    void controller.resizeTerminal(client.id, Math.max(2, client.terminal.cols), Math.max(1, client.terminal.rows)).catch(() => {});
+  }
+  function attach(client: Client): void {
+    current = client;
+    replace(viewport, client.element);
+    // xterm measures fonts and initializes its renderer during open(). A
+    // detached container has zero dimensions and can leave a blank terminal
+    // even after it is inserted. Open only after attachment; inactive clients
+    // can buffer output until their context becomes visible.
+    if (!client.opened) { client.terminal.open(client.element); client.opened = true; }
+    fit();
+    requestAnimationFrame(() => {
+      if (current !== client || !active) return;
+      fit(); client.terminal.refresh(0, client.terminal.rows - 1);
+    });
+    renderStatus();
+  }
+  async function open(fresh = false): Promise<void> {
+    const state = store.get(); const projectId = state.selection.projectId;
+    if (!active || !isVisible() || projectId === undefined || loading || selected === undefined || state.host.status !== "ready") return;
+    const context = selected; const version = generation;
+    if (!fresh && clients.has(context)) { attach(clients.get(context)!); return; }
+    loading = true; renderStatus(); error.textContent = "";
+    try {
+      const old = clients.get(context);
+      if (old !== undefined) {
+        await controller.closeTerminal(old.id); old.terminal.dispose(); clients.delete(context);
+        if (current === old) { current = undefined; viewport.replaceChildren(); }
+      }
+      const snapshot = await controller.openTerminal(projectId, state.selection.sessionId, 80, 24);
+      const terminal = new Terminal({ fontFamily: '"Geist Mono Variable", "MesloLGS NF", "Symbols Nerd Font Mono", monospace', fontSize: 13, lineHeight: 1.4, cursorBlink: true, scrollback: 5000, convertEol: false,
+        theme: { background: "#171918", foreground: "#e6e4d9", cursor: "#e6e4d9", selectionBackground: "#3c4844" } });
+      const addon = new FitAddon(); terminal.loadAddon(addon);
+      const container = h("div", { class: "terminal-instance" });
+      const client: Client = { terminal, fit: addon, element: container, id: snapshot.id, offset: 0, exited: snapshot.exited, backend: snapshot.backend, writes: Promise.resolve(), opened: false };
+      clients.set(context, client);
+      terminal.onData((data) => {
+        // Preserve paste/key order while bounding each bridge payload.
+        for (let start = 0; start < data.length; start += 16_384) {
+          const chunk = data.slice(start, start + 16_384);
+          client.writes = client.writes.then(() => controller.writeTerminal(client.id, chunk)).catch((failure: unknown) => { if (current === client) error.textContent = message(failure); });
+        }
+      });
+      append(client, snapshot);
+      // A session may have been removed while the native shell was opening.
+      // Its host context is already closed; do not retain a dead xterm client.
+      if (state.selection.sessionId !== undefined && !store.get().sessions.some((session) => session.id === state.selection.sessionId)) {
+        clients.delete(context); terminal.dispose();
+        await controller.closeTerminal(snapshot.id);
+        return;
+      }
+      if (version === generation) { attach(client); terminal.focus(); }
+    } catch (failure) { if (version === generation) error.textContent = message(failure); }
+    finally { loading = false; renderStatus(); if (version !== generation && active) void open(); }
+  }
+  function append(client: Client, snapshot: TerminalSnapshot): void {
+    if (snapshot.start !== client.offset && client.offset !== 0) client.terminal.write("\r\n[Earlier terminal output was truncated]\r\n");
+    if (snapshot.output !== "") client.terminal.write(snapshot.output);
+    client.offset = snapshot.offset; client.exited = snapshot.exited;
+    if (snapshot.exitCode !== undefined) client.exitCode = snapshot.exitCode;
+  }
+  async function read(): Promise<void> {
+    const client = current;
+    if (reading || client === undefined || !active || !isVisible() || document.visibilityState === "hidden") return;
+    reading = true;
+    try { append(client, await controller.readTerminal(client.id, client.offset)); if (current === client) renderStatus(); }
+    catch (failure) { if (current === client) { error.textContent = message(failure); client.exited = true; } }
+    finally { reading = false; }
+  }
+  async function closeCurrent(): Promise<void> {
+    const client = current; const context = selected;
+    if (client === undefined || context === undefined) return;
+    try { await controller.closeTerminal(client.id); client.terminal.dispose(); clients.delete(context); if (current === client) { current = undefined; viewport.replaceChildren(); renderStatus(); } }
+    catch (failure) { error.textContent = message(failure); }
+  }
+  store.watch((state) => [state.selection.projectId, state.selection.sessionId, state.host.status, state.sessions], () => {
+    const state = store.get(); const next = state.selection.projectId === undefined ? undefined : state.selection.sessionId === undefined ? `project:${state.selection.projectId}` : `session:${state.selection.sessionId}`;
+    const retained = new Set(state.sessions.map((session) => `session:${session.id}`));
+    for (const [context, client] of clients) {
+      if (context.startsWith("session:") && !retained.has(context)) { client.terminal.dispose(); clients.delete(context); }
+    }
+    if (next !== selected) { generation++; selected = next; current = next === undefined ? undefined : clients.get(next); error.textContent = ""; replace(viewport, current?.element); renderStatus(); }
+    if (active) void open();
+  });
+  let resizeTimer: number | undefined;
+  new ResizeObserver(() => { window.clearTimeout(resizeTimer); resizeTimer = window.setTimeout(fit, 80); }).observe(viewport);
+  const poll = window.setInterval(() => void read(), 200);
+  // beforeunload can be cancelled by native navigation/quit policy. Dispose
+  // only after the document actually unloads, or a cancelled close leaves a
+  // blank terminal and permanently stops its output polling.
+  window.addEventListener("unload", () => { clearInterval(poll); for (const client of clients.values()) client.terminal.dispose(); });
+  renderStatus();
+  return { element, setActive(next: boolean) { const opening = next && !active; active = next; if (opening) { void open(); requestAnimationFrame(fit); } } };
+}
+function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }

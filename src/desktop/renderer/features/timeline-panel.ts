@@ -1,0 +1,579 @@
+/**
+ * Timeline surface: existing project history and an optional session recorder.
+ *
+ * Presentation only. Capability, opt-in, capture, import, filtering, and
+ * diff generation are host behavior (`features/timeline`); this module
+ * requests them through the controller and renders the results.
+ *
+ * Project history opens without recording opt-in or a selected session.
+ * Session states (product specification section 6.2): no project, no session,
+ * checking support, unsupported, supported but disabled (Import timeline),
+ * enabled without visible checkpoints, enabled with checkpoints, and a
+ * bounded-import notice. A remembered capture failure is shown as a warning.
+ *
+ * Each checkpoint shows "N files changed", its label, provenance, local
+ * date/time, a collapsible folder/file tree of visible changed paths, and a diff
+ * preview of the selected file (the first file by default) limited to 16
+ * rendered rows, expandable to the full bounded patch. The newest matching
+ * checkpoint is open unless the user explicitly toggled it. The list is
+ * newest first, so the latest observation is at the top of the side panel.
+ *
+ * Search is a case-insensitive substring match over the checkpoint number,
+ * label, and changed paths. It filters the loaded list and never searches
+ * file contents.
+ *
+ * Freshness: the panel reloads on project/session/scope changes, on becoming
+ * visible, and on relevant `timeline.changed` events. Project history also
+ * polls external Git changes every four seconds while open. Loads are
+ * serialized; changes during a load coalesce. Generation checks discard
+ * replies for previous query identities and then load the current one.
+ *
+ * The panel element is created once and re-attached by the workbench on
+ * every render, so the search field keeps its value (and focus, which the
+ * workbench restores) while runs stream.
+ */
+import type {
+  ProjectRepositories,
+  TimelineChangedPath,
+  TimelineCheckpointEntry,
+  TimelineFileDiff,
+  TimelineProjectHistory,
+  TimelineProjectHistoryEntry,
+  TimelineStatus,
+} from "../../../contracts/desktop/index.js";
+import type { Controller } from "../controller.js";
+import { h, replace } from "../dom.js";
+import { icon } from "../icons.js";
+import type { Store } from "../store.js";
+import { diffRows, type DiffRow } from "./change-diff.js";
+import { buildTree, type TreeFolder } from "./timeline-tree.js";
+
+/** Rendered rows in a collapsed preview (specification section 9). */
+export const PREVIEW_ROWS = 16;
+/** Cached file diffs; checkpoints are immutable, so entries never go stale. */
+const DIFF_CACHE_LIMIT = 40;
+type HistoryEntry = TimelineCheckpointEntry | TimelineProjectHistoryEntry;
+
+const STATUS_LETTER: Record<TimelineChangedPath["status"], { readonly letter: string; readonly label: string }> = {
+  added: { letter: "A", label: "Added" },
+  modified: { letter: "M", label: "Modified" },
+  deleted: { letter: "D", label: "Deleted" },
+  type_changed: { letter: "T", label: "Type changed" },
+};
+
+export interface TimelinePanel {
+  readonly element: HTMLElement;
+  /** Tells the panel whether it is the open surface; becoming active reloads. */
+  setActive(active: boolean): void;
+}
+
+interface DiffState {
+  readonly promise: Promise<TimelineFileDiff>;
+  result?: TimelineFileDiff;
+  error?: string;
+}
+
+export function createTimelinePanel(store: Store, controller: Controller, isVisible: () => boolean): TimelinePanel {
+  let active = false;
+  let sessionId: string | undefined;
+  let projectId: string | undefined;
+  // Timeline can browse a nested repository without navigating away from
+  // the selected chat. Actual chat project changes reset this local choice.
+  let selectedProjectId: string | undefined;
+  let scope: "project" | "session" = "project";
+  let projectHistory: TimelineProjectHistory | undefined;
+  let poll: ReturnType<typeof setInterval> | undefined;
+  let generation = 0;
+  let status: TimelineStatus | undefined;
+  let checkpoints: readonly HistoryEntry[] = [];
+  let loadError: string | undefined;
+  let actionError: string | undefined;
+  let changing = false;
+  let inFlight = false;
+  let stale = true;
+  let query = "";
+  let repositories: ProjectRepositories | undefined;
+  let repositoryError: string | undefined;
+  let discovering = false;
+  let openingRepository = false;
+  let repositoryNoticeKey: string | undefined;
+  // Explicit user choices only; absent means "use the default".
+  const expansion = new Map<string, boolean>();
+  const collapsedFolders = new Map<string, Set<string>>();
+  const selectedFiles = new Map<string, string>();
+  const fullPreviews = new Set<string>();
+  const diffs = new Map<string, DiffState>();
+
+  const search = h("input", {
+    class: "timeline-search", type: "search", placeholder: "Filter recorded changes",
+    aria: { label: "Filter recorded changes" },
+    onInput: () => { query = search.value; renderList(); },
+  });
+  const disable = h("button", {
+    class: "button button-small", type: "button", title: "Stop recording and hide this session's timeline. History is kept.",
+    onClick: () => void (scope === "project" ? setProjectRecording() : setEnabled(false)),
+  }, "Disable");
+  const projectTab = h("button", {
+    type: "button", role: "tab", onClick: () => changeScope("project"),
+  }, "Project history");
+  const sessionTab = h("button", {
+    type: "button", role: "tab", onClick: () => changeScope("session"),
+  }, "This session");
+  const refresh = h("button", {
+    class: "icon-button", type: "button", title: "Refresh timeline", aria: { label: "Refresh timeline" },
+    onClick: () => void load(),
+  }, icon("arrow-clockwise"));
+  const tabs = h("div", { class: "timeline-scopes" },
+    h("div", { role: "tablist", aria: { label: "Timeline scope" } }, projectTab, sessionTab), refresh);
+  const controls = h("div", { class: "timeline-controls" }, search, disable);
+  const notices = h("div", { class: "timeline-notices" });
+  const list = h("div", { class: "timeline-list", role: "list", aria: { label: "Recorded changes" } });
+  const repositoryName = h("span", { class: "timeline-repository-name" });
+  const repositoryContext = h("div", { class: "timeline-repository-context" }, repositoryName,
+    h("button", { class: "button button-small", type: "button", onClick: () => {
+      projectId = selectedProjectId;
+      reset(); render(); void load();
+    } }, "Back to project"));
+  const element = h("div", { class: "git-changes-content timeline-content" }, repositoryContext, tabs, controls, notices, list);
+
+  /** Drop state whenever the query identity changes, including during a load. */
+  function reset(): void {
+    generation++;
+    status = undefined;
+    projectHistory = undefined;
+    checkpoints = [];
+    loadError = undefined;
+    actionError = undefined;
+    repositories = undefined;
+    repositoryError = undefined;
+    discovering = false;
+    openingRepository = false;
+    repositoryNoticeKey = undefined;
+    stale = true;
+    query = "";
+    search.value = "";
+    expansion.clear();
+    collapsedFolders.clear();
+    selectedFiles.clear();
+    fullPreviews.clear();
+    diffs.clear();
+  }
+
+  function changeScope(next: typeof scope): void {
+    if (scope === next) return;
+    scope = next;
+    reset();
+    render();
+    void load();
+  }
+
+  /** True while a run edits the session's project; the host enforces this too. */
+  function busy(): boolean {
+    const state = store.get();
+    const target = scope === "project" ? projectId : state.selection.projectId;
+    return Object.values(state.live).some((live) => live.run.projectId === target);
+  }
+
+  async function load(): Promise<void> {
+    const selected = scope === "project" ? projectId : sessionId;
+    if (!active || !isVisible() || document.visibilityState === "hidden" || selected === undefined || store.get().host.status !== "ready") return;
+    if (inFlight) { stale = true; return; }
+    inFlight = true;
+    stale = false;
+    const version = generation;
+    try {
+      if (scope === "project") {
+        const result = await controller.timelineProjectHistory(selected);
+        if (version === generation) {
+          projectHistory = result; checkpoints = result.checkpoints; loadError = undefined;
+          if (!result.supported && repositories === undefined && !discovering) void discoverRepositories();
+        }
+      } else {
+        const result = await controller.timelineCheckpoints(selected);
+        if (version === generation) { status = result.status; checkpoints = result.checkpoints; loadError = undefined; }
+      }
+    } catch (error) {
+      if (version === generation) loadError = error instanceof Error ? error.message : String(error);
+    } finally {
+      inFlight = false;
+    }
+    render();
+    if (stale || version !== generation) void load();
+  }
+
+  /** Reuse Projects' bounded discovery; stale replies cannot cross folders/scopes. */
+  async function discoverRepositories(deep = false): Promise<void> {
+    const selected = projectId;
+    if (selected === undefined || discovering) return;
+    const version = generation;
+    discovering = true;
+    repositoryError = undefined;
+    render();
+    try {
+      const result = await controller.discoverProjectRepositories(selected, deep ? { rescan: true, deep: true } : {});
+      if (version === generation) repositories = result;
+    } catch (error) {
+      if (version === generation) repositoryError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (version === generation) { discovering = false; render(); }
+    }
+  }
+
+  /** Discovered folders use normal project identity/tracking, but selecting
+   * one changes only this panel's query. The chat keeps its session/project.
+   */
+  async function openRepository(relativePath: string): Promise<void> {
+    const project = store.get().projects.find((candidate) => candidate.id === projectId);
+    if (project === undefined || openingRepository || !repositories?.paths.includes(relativePath)) return;
+    const version = generation;
+    const path = relativePath === "." ? project.path : `${project.path.replace(/[\\/]+$/, "")}/${relativePath}`;
+    openingRepository = true;
+    repositoryError = undefined;
+    render();
+    try {
+      const target = store.get().projects.find((candidate) => candidate.path === path)
+        ?? await controller.registerProject({ path });
+      if (version !== generation) return;
+      if (target === undefined) { repositoryError = "Could not open this repository. Try again."; return; }
+      projectId = target.id;
+      reset();
+      render();
+      void load();
+    } catch (error) {
+      if (version === generation) repositoryError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (version === generation) { openingRepository = false; render(); }
+    }
+  }
+
+  function renderRepositoryChooser(): HTMLElement {
+    return h("section", { class: "timeline-repositories", aria: { label: "Choose a repository" } },
+      h("h3", {}, "Choose a repository"),
+      h("p", {}, "Choose a repository to view its Timeline alongside this session."),
+      h("div", { class: "timeline-repository-list" },
+        ...(repositories?.paths ?? []).map((path) => h("button", {
+          class: "timeline-repository-choice", type: "button", disabled: openingRepository,
+          title: path, aria: { label: `Open repository ${path}` }, onClick: () => void openRepository(path),
+        }, icon("folder-open"), h("span", {}, path), icon("arrow-right"))),
+      ),
+      discovering ? note("Finding repository folders…") : null,
+      !discovering && repositories?.paths.length === 0 ? note("No repository folders found. Try a deeper scan.") : null,
+      repositories?.limited ? note("More repositories may exist outside this scan. Scan deeper to find them.") : null,
+      ...(repositories?.warnings ?? []).map((warning) => note(warning)),
+      repositoryError === undefined ? null : h("p", { class: "error-line timeline-note", role: "alert" }, repositoryError),
+      h("button", { class: "button button-small", type: "button", disabled: discovering || openingRepository,
+        onClick: () => void discoverRepositories(true) }, "Scan deeper"),
+    );
+  }
+
+  async function setEnabled(enabled: boolean): Promise<void> {
+    const selected = sessionId;
+    if (selected === undefined || changing) return;
+    changing = true;
+    actionError = undefined;
+    render();
+    const version = generation;
+    try {
+      const result = await controller.setTimelineEnabled(selected, enabled);
+      if (version === generation) status = result;
+    } catch (error) {
+      if (version === generation) actionError = error instanceof Error ? error.message : String(error);
+    } finally {
+      changing = false;
+    }
+    if (version !== generation) return;
+    render();
+    void load();
+  }
+
+  async function setProjectRecording(): Promise<void> {
+    if (projectId === undefined || changing) return;
+    const version = generation;
+    changing = true;
+    actionError = undefined;
+    render();
+    try {
+      const result = await controller.setProjectTimelineEnabled(projectId, !projectHistory?.recording);
+      if (version === generation) { projectHistory = result; checkpoints = result.checkpoints; }
+    } catch (error) {
+      if (version === generation) actionError = error instanceof Error ? error.message : String(error);
+    } finally { changing = false; }
+    if (version === generation) render();
+  }
+
+  function render(): void {
+    const state = store.get();
+    repositoryContext.hidden = scope !== "project" || projectId === selectedProjectId;
+    const viewed = state.projects.find((project) => project.id === projectId);
+    repositoryName.textContent = viewed?.path.split(/[\\/]/).at(-1) ?? "Repository";
+    repositoryName.title = viewed?.path ?? "";
+    const enabled = scope === "project" ? projectHistory?.supported === true : status?.supported === true && status.enabled;
+    tabs.hidden = projectId === undefined;
+    projectTab.setAttribute("aria-selected", String(scope === "project"));
+    sessionTab.setAttribute("aria-selected", String(scope === "session"));
+    // Native tab semantics: arrows move between the two views.
+    projectTab.tabIndex = scope === "project" ? 0 : -1;
+    sessionTab.tabIndex = scope === "session" ? 0 : -1;
+    disable.textContent = scope === "project" ? projectHistory?.recording ? "Pause" : "Resume" : "Disable";
+    disable.title = scope === "project" ? "Pause or resume automatic project recording. History is kept." : "Stop recording this session. History is kept.";
+    controls.hidden = !enabled;
+    disable.disabled = changing || (scope === "session" && busy());
+    // Polling must not detach focused folder buttons when the discovery and
+    // unsupported state are unchanged; keyboard users can browse the list.
+    const chooserKey = scope === "project" && projectHistory?.supported === false && loadError === undefined
+      ? JSON.stringify([projectId, projectHistory.reason, repositories, repositoryError, discovering, openingRepository]) : undefined;
+    if (chooserKey === undefined || chooserKey !== repositoryNoticeKey) {
+      replace(notices, ...renderNotices(state.selection.projectId, enabled));
+      repositoryNoticeKey = chooserKey;
+    }
+    renderList();
+  }
+
+  function renderNotices(projectId: string | undefined, enabled: boolean): readonly HTMLElement[] {
+    const lines: HTMLElement[] = [];
+    if (projectId === undefined) return [note("Open a project to view its timeline.")];
+    if (scope === "project") {
+      if (loadError !== undefined) return [h("p", { class: "error-line timeline-note" }, loadError)];
+      if (projectHistory === undefined) return [note("Loading project history…")];
+      if (!projectHistory.supported) return [note(projectHistory.reason ?? "Timeline is not supported for this project."), renderRepositoryChooser()];
+      if (projectHistory.truncated) lines.push(note("Showing history from the 200 most recent commits and saved snapshots."));
+      if (projectHistory.captureError !== undefined) lines.push(note(`Project changes could not be recorded: ${projectHistory.captureError}`, "warning-circle"));
+      if (actionError !== undefined) lines.push(h("p", { class: "error-line timeline-note" }, actionError));
+      if (checkpoints.length === 0) lines.push(note("No existing commits or recorded file changes in this project yet."));
+      return lines;
+    }
+    if (sessionId === undefined) return [note("Open a session to view its timeline.")];
+    if (loadError !== undefined) return [h("p", { class: "error-line timeline-note" }, loadError)];
+    if (status === undefined) return [note("Checking timeline support…")];
+    if (!status.supported) return [note(status.reason ?? "Timeline is not supported for this project."),
+      h("button", { class: "button button-small", type: "button", onClick: () => changeScope("project") }, "Choose a repository folder")];
+    if (!status.enabled) {
+      lines.push(
+        h("div", { class: "timeline-intro" },
+          h("p", {}, "Timeline is optional. It records observed states of this project's repository while runs edit it, so you can inspect intermediate changes later."),
+          h("p", {}, "Import timeline brings in recorded changes for this session and records future changes. Snapshots are stored as hidden Git references in this repository; your branch, staging area, and files are not changed."),
+          h("button", {
+            class: "button button-primary button-small", type: "button", disabled: changing || busy(),
+            title: busy() ? "Stop the current run before changing timeline settings." : "Import recorded changes and record future changes",
+            onClick: () => void setEnabled(true),
+          }, changing ? "Importing…" : "Import timeline")),
+      );
+    }
+    if (actionError !== undefined) lines.push(h("p", { class: "error-line timeline-note" }, actionError));
+    if (enabled && status.captureError !== undefined) {
+      lines.push(note(`The last timeline snapshot could not be recorded: ${status.captureError} Rack will try again on the next run.`, "warning-circle"));
+    }
+    if (enabled && status.importTruncated) lines.push(note("Showing up to 2,001 recent recorded entries for this session."));
+    if (enabled && checkpoints.length === 0) lines.push(note("No recorded changes for this session. Future file changes will appear here."));
+    return lines;
+  }
+
+  function renderList(): void {
+    const enabled = scope === "project" ? projectHistory?.supported === true : status?.supported === true && status.enabled;
+    const scroll = list.scrollTop;
+    if (!enabled || checkpoints.length === 0) { replace(list); return; }
+    const needle = query.trim().toLowerCase();
+    const matching = checkpoints.filter((entry) => needle === "" ||
+      `${entry.position} #${entry.position} ${entry.label} ${entry.files.map((file) => file.path).join(" ")}`.toLowerCase().includes(needle));
+    if (matching.length === 0) {
+      replace(list, h("p", { class: "git-empty" }, "No matching recorded changes."));
+      return;
+    }
+    const latest = matching.at(-1);
+    replace(list, ...[...matching].reverse().map((entry) => renderCheckpoint(entry, entry === latest)));
+    list.scrollTop = scroll;
+  }
+
+  function renderCheckpoint(entry: HistoryEntry, latest: boolean): HTMLElement {
+    const open = expansion.get(entry.id) ?? latest;
+    const count = entry.files.length;
+    const date = new Date(entry.createdAt);
+    const time = scope === "project" ? date.toLocaleDateString([], { month: "short", day: "numeric" })
+      : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+    const provenance = entry.source === "git" ? `Git commit ${"snapshot" in entry ? entry.snapshot.slice(0, 8) : ""}`
+      : "sessionId" in entry ? `Session ${entry.sessionId}` : "Recorded change";
+    const details = h("details", { class: "timeline-entry", open, data: { checkpointId: entry.id } },
+      h("summary", { title: `${entry.label} · ${provenance} · ${date.toLocaleString()}` },
+        icon("caret-right", { className: "activity-caret" }),
+        h("span", { class: "timeline-position" }, scope === "project" ? entry.source === "git" ? "Git" : entry.runId === undefined ? "Change" : "Run" : `#${entry.position}`),
+        h("span", { class: "timeline-title" }, `${count} ${count === 1 ? "file" : "files"} changed`),
+        h("span", { class: "timeline-label" }, entry.label),
+        h("time", { class: "timeline-time" }, time),
+        openSnapshotButton(entry)),
+    );
+    if (open) details.append(...renderBody(entry));
+    details.addEventListener("toggle", () => {
+      if (!details.isConnected) return;
+      expansion.set(entry.id, details.open);
+      // Build the body lazily so closed checkpoints never request diffs.
+      if (details.open && details.childElementCount === 1) details.append(...renderBody(entry));
+    });
+    return h("article", { class: "timeline-item", role: "listitem" }, details);
+  }
+
+  function renderBody(entry: HistoryEntry): readonly HTMLElement[] {
+    const selected = entry.files.find((file) => file.path === selectedFiles.get(entry.id)) ?? entry.files[0];
+    const preview = h("div", { class: "timeline-preview" });
+    if (selected !== undefined) renderPreview(preview, entry, selected);
+    return [renderTree(entry, selected?.path), preview];
+  }
+
+  /** Native viewer captures this scope/identity; later sidebar navigation is independent. */
+  function openSnapshotButton(entry: HistoryEntry, path?: string): HTMLButtonElement {
+    return h("button", {
+      class: "icon-button timeline-expand", type: "button", title: "Open snapshot in a new window",
+      aria: { label: path === undefined ? `Open snapshot: ${entry.label}` : `Open snapshot file: ${path}` },
+      onClick: (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const contextId = scope === "project" ? projectId : sessionId;
+        if (contextId === undefined) return;
+        const version = generation;
+        void controller.openTimelineWindow({ scope, contextId, checkpointId: entry.id,
+          ...(path === undefined ? {} : { path }) }).catch((error: unknown) => {
+          if (version !== generation) return;
+          actionError = error instanceof Error ? error.message : String(error);
+          render();
+        });
+      },
+    }, icon("arrows-out-simple"));
+  }
+
+  function renderTree(entry: HistoryEntry, selectedPath: string | undefined): HTMLElement {
+    const collapsed = collapsedFolders.get(entry.id) ?? new Set<string>();
+    collapsedFolders.set(entry.id, collapsed);
+    const tree = buildTree(entry.files);
+    const container = h("div", { class: "timeline-tree", role: "tree", aria: { label: `Files changed in checkpoint ${entry.position}` } });
+    const renderNode = (node: TreeFolder, depth: number): HTMLElement[] => {
+      const rows: HTMLElement[] = [];
+      for (const folder of node.folders) {
+        const folderDetails = h("details", { class: "timeline-folder", open: !collapsed.has(folder.path) },
+          indent(h("summary", { role: "treeitem", title: folder.path },
+            icon("caret-right", { className: "activity-caret" }), icon("folder-simple"), h("span", { class: "git-file-name" }, folder.name)), depth),
+          ...renderNode(folder, depth + 1));
+        folderDetails.addEventListener("toggle", () => {
+          if (!folderDetails.isConnected) return;
+          if (folderDetails.open) collapsed.delete(folder.path); else collapsed.add(folder.path);
+        });
+        rows.push(folderDetails);
+      }
+      for (const file of node.files) {
+        const meta = STATUS_LETTER[file.status];
+        rows.push(indent(h("button", {
+          class: `git-file-row status-${file.status}${file.path === selectedPath ? " selected" : ""}`, type: "button", role: "treeitem",
+          title: `${file.path} · ${meta.label}`,
+          aria: { selected: String(file.path === selectedPath), label: `${file.path}, ${meta.label}` },
+          onClick: () => { selectedFiles.set(entry.id, file.path); renderList(); },
+        }, icon("file-text"), h("span", { class: "git-file-name" }, basename(file.path)), h("span", { class: "git-file-directory" }),
+          h("span", { class: "git-file-status", title: meta.label }, meta.letter)), depth));
+      }
+      return rows;
+    };
+    container.append(...renderNode(tree, 0));
+    return container;
+  }
+
+  function renderPreview(container: HTMLElement, entry: HistoryEntry, file: TimelineChangedPath): void {
+    const selected = scope === "project" ? projectId : sessionId;
+    if (selected === undefined) return;
+    const key = `${selected}|${entry.id}|${file.path}`;
+    let state = diffs.get(key);
+    if (state === undefined) {
+      const promise = scope === "project" ? controller.timelineProjectFileDiff(selected, entry.id, file.path)
+        : controller.timelineFileDiff(selected, entry.id, file.path);
+      const created: DiffState = { promise };
+      state = created;
+      diffs.set(key, created);
+      if (diffs.size > DIFF_CACHE_LIMIT) diffs.delete(diffs.keys().next().value!);
+      promise.then((result) => { created.result = result; }, (error: unknown) => {
+        created.error = error instanceof Error ? error.message : String(error);
+        // Allow a later attempt, for example after Git becomes available.
+        if (diffs.get(key) === created) diffs.delete(key);
+      }).finally(() => { if (container.isConnected) renderPreview(container, entry, file); });
+    }
+    const heading = h("div", { class: "git-diff-heading" },
+      h("span", { class: "git-diff-filename", title: file.path }, file.path),
+      h("span", { class: "git-diff-source" }, STATUS_LETTER[file.status].label), openSnapshotButton(entry, file.path));
+    if (state.error !== undefined) { replace(container, heading, h("p", { class: "error-line timeline-note" }, state.error)); return; }
+    if (state.result === undefined) { replace(container, heading, h("p", { class: "git-empty" }, "Loading changes…")); return; }
+    const result = state.result;
+    const rows = diffRows(result.diff).filter((row) => row.kind !== "meta" || !row.text.startsWith("Binary "));
+    if (result.notice !== undefined || rows.length === 0) {
+      replace(container, heading, h("p", { class: "git-empty" }, result.notice ?? "No text changes in this file."));
+      return;
+    }
+    const full = fullPreviews.has(key);
+    const shown = full ? rows : rows.slice(0, PREVIEW_ROWS);
+    replace(container, heading,
+      h("div", { class: "git-diff-scroll timeline-diff", aria: { label: `Changes in ${file.path}` } }, ...shown.map(renderRow)),
+      rows.length > PREVIEW_ROWS ? h("button", {
+        class: "timeline-more", type: "button",
+        onClick: () => { if (full) fullPreviews.delete(key); else fullPreviews.add(key); renderPreview(container, entry, file); },
+      }, full ? "Show less" : `Show all ${rows.length} rows`) : null,
+      result.truncated ? h("p", { class: "git-preview-note" }, "This diff was shortened for preview.") : null);
+  }
+
+  controller.onTimelineChanged((changed) => {
+    if (scope === "session" && changed !== sessionId) return;
+    if (active && isVisible()) void load(); else stale = true;
+  });
+  store.watch((state) => [state.selection.projectId, state.selection.sessionId, state.host.status], () => {
+    const selection = store.get().selection;
+    const projectChanged = selection.projectId !== selectedProjectId;
+    const changed = projectChanged || (scope === "session" && selection.sessionId !== sessionId);
+    selectedProjectId = selection.projectId;
+    if (projectChanged) projectId = selection.projectId;
+    sessionId = selection.sessionId;
+    if (changed) reset();
+    render();
+    if (stale) void load();
+  });
+  // Run start/finish changes whether settings can be toggled.
+  store.watch((state) => state.live, () => { if (active) render(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && active) void load();
+  });
+  tabs.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "Home" && event.key !== "End") return;
+    if (event.target !== projectTab && event.target !== sessionTab) return;
+    event.preventDefault();
+    const next = event.key === "Home" ? "project" : event.key === "End" ? "session" : scope === "project" ? "session" : "project";
+    changeScope(next);
+    (next === "project" ? projectTab : sessionTab).focus();
+  });
+
+  return {
+    element,
+    setActive(next) {
+      const becameActive = next && !active;
+      active = next;
+      if (poll !== undefined) { clearInterval(poll); poll = undefined; }
+      // Poll external Git commits/ref changes only while the panel is open.
+      if (active) poll = setInterval(() => { if (scope === "project") void load(); }, 4000);
+      if (becameActive) { render(); void load(); }
+    },
+  };
+}
+
+function renderRow(row: DiffRow): HTMLElement {
+  if (row.kind === "hunk" || row.kind === "meta") return h("div", { class: "git-diff-hunk" }, row.text);
+  return h("div", { class: `git-diff-line ${row.kind}` },
+    h("span", { class: "git-line-number" }, row.oldLine ?? ""),
+    h("span", { class: "git-line-number" }, row.newLine ?? ""),
+    h("span", { class: "git-line-sign" }, row.kind === "added" ? "+" : row.kind === "removed" ? "−" : " "),
+    h("span", { class: "git-line-text" }, row.text || " "));
+}
+
+function note(text: string, iconName: "info" | "warning-circle" = "info"): HTMLElement {
+  return h("p", { class: "note timeline-note" }, icon(iconName), h("span", {}, text));
+}
+
+/** Tree indentation through the CSSOM; the renderer CSP forbids style attributes. */
+function indent<T extends HTMLElement>(element: T, depth: number): T {
+  element.style.paddingLeft = `${12 + depth * 12}px`;
+  return element;
+}
+
+function basename(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1);
+}

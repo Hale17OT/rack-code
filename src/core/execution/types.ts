@@ -1,5 +1,9 @@
 import type { CredentialReference } from "../authentication/index.js";
 import type { SessionAttachment } from "../sessions/attachments.js";
+import type { UserQuestion, UserQuestionRequest, UserQuestionResponse } from "./question-types.js";
+import type { NativeTerminalInput, TerminalProcess } from "./terminal.js";
+import type { RuntimeAppTool } from "./app-tools.js";
+export type { UserQuestion, UserQuestionRequest, UserQuestionResponse } from "./question-types.js";
 
 export type RunId = string;
 export type AttemptId = string;
@@ -54,6 +58,10 @@ export interface RuntimeRunInput {
   readonly continuation?: RuntimeContinuation;
   readonly signal: AbortSignal;
   readonly requestApproval: (request: Omit<ApprovalRequest, "id">) => Promise<ApprovalDecision>;
+  /** Optional for older adapter clients; ExecutionService always supplies it. */
+  readonly requestQuestions?: (questions: readonly UserQuestion[], signal?: AbortSignal) => Promise<UserQuestionResponse | null>;
+  /** Optional app capabilities supplied explicitly by composition. */
+  readonly tools?: readonly RuntimeAppTool[];
 }
 
 export interface RuntimeCapabilities {
@@ -124,6 +132,8 @@ export type RuntimeEvent =
   | { readonly type: "tool_output_delta"; readonly text: string; readonly toolCallId?: string }
   | { readonly type: "tool_result"; readonly output: unknown; readonly toolCallId?: string; readonly isError?: boolean }
   | { readonly type: "approval_request"; readonly request: ApprovalRequest }
+  | { readonly type: "question_request"; readonly request: UserQuestionRequest }
+  | { readonly type: "question_resolved"; readonly requestId: string; readonly response: UserQuestionResponse | null }
   | { readonly type: "native_session"; readonly nativeSessionId: string }
   | { readonly type: "usage"; readonly inputTokens?: number; readonly outputTokens?: number; readonly costUsd?: number }
   | { readonly type: "availability"; readonly status: "available" | "unavailable" | "reauth_required"; readonly reason?: string; readonly quotaResetAt?: string }
@@ -135,6 +145,8 @@ export interface RuntimeAdapter {
   readonly runtimeId: string;
   /** Stable provider identity used for account selection and model routing. */
   readonly providerId?: string;
+  /** Native shell control without a model turn, when publicly supported. */
+  readonly openTerminal?: (input: NativeTerminalInput) => Promise<TerminalProcess>;
   /** Discovers selectable models for this account/project; rejects on provider failure. */
   readonly models?: (input: RuntimeModelInput) => Promise<readonly RuntimeModel[]>;
   capabilities(account: RuntimeAccountContext): Promise<RuntimeCapabilities>;

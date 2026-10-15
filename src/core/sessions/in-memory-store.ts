@@ -17,6 +17,10 @@ export class InMemorySessionStore implements SessionStore {
   async save(session: SessionRecord): Promise<void> {
     this.sessions.set(session.id, cloneSession(session));
   }
+
+  async remove(sessionId: SessionId): Promise<void> {
+    this.sessions.delete(sessionId);
+  }
 }
 
 function cloneSession(session: SessionRecord): SessionRecord {

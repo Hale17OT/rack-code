@@ -15,6 +15,7 @@ import { icon } from "../icons.js";
 import type { AppState, Store } from "../store.js";
 import { openSessionImport } from "./session-import.js";
 import { moveRow, orderedIds } from "./sidebar-order.js";
+import { openModal } from "../components/modal.js";
 
 const EXPANDED_KEY = "sidebar.expandedProjects";
 
@@ -87,6 +88,34 @@ export function mountNavigator(root: HTMLElement, store: Store, controller: Cont
     await controller.createProject({ path });
   }
 
+  function removeSession(sessionId: string, title: string): void {
+    let closed = false;
+    const error = h("p", { class: "error-line session-remove-error", role: "alert" });
+    const cancel = h("button", { class: "button button-small", type: "button", onClick: () => modal.close() }, "Cancel");
+    const remove = h("button", { class: "button button-primary button-small", type: "button", onClick: async () => {
+      if (remove.disabled) return;
+      remove.disabled = true;
+      remove.textContent = "Removing…";
+      error.textContent = "";
+      if (await controller.removeSession(sessionId)) {
+        const restoreFocus = !closed;
+        modal.close();
+        // Removal rebuilds the tree, so the original trigger no longer
+        // exists. Return keyboard focus to the selected project instead.
+        if (restoreFocus) requestAnimationFrame(() => tree.querySelector<HTMLElement>('.tree-folder-toggle[aria-current="true"]')?.focus());
+      } else {
+        remove.disabled = false;
+        remove.textContent = "Remove session";
+        error.textContent = store.get().notice?.message ?? "Could not remove this session. Try again.";
+      }
+    } }, "Remove session");
+    const modal = openModal({ title: "Remove session?", className: "session-remove-modal", onClose: () => { closed = true; }, content: h("div", { class: "modal-body" },
+      h("p", {}, `Remove “${title}” from Rack? You won’t be able to reopen this conversation here.`),
+      h("p", { class: "note" }, "Project files and provider history are kept. Local execution records, attachments and Timeline snapshots are retained."),
+      error, h("div", { class: "modal-actions" }, cancel, remove)),
+    });
+  }
+
   const tree = h("div", { class: "tree" });
   const add = iconButton("folder-simple-plus", "Add project", () => void addProject());
 
@@ -133,12 +162,17 @@ export function mountNavigator(root: HTMLElement, store: Store, controller: Cont
     const folder = h("div", { class: "tree-folder project-folder" },
       h("button", {
         class: "tree-folder-toggle",
-        aria: { expanded: String(isOpen) },
+        aria: { expanded: String(isOpen), current: String(state.selection.projectId === project.id) },
         title: project.path,
         onClick: () => {
           if (isOpen) expanded.delete(project.id);
           else expanded.add(project.id);
           saveExpanded(expanded);
+          // A folder must be selectable even with no sessions, so existing
+          // Git history can be inspected before creating a conversation.
+          // selectProject keeps the current session when this folder is
+          // already selected, preserving normal collapse/expand behavior.
+          void controller.selectProject(project.id);
           renderTree(store.get());
         },
       },
@@ -148,17 +182,18 @@ export function mountNavigator(root: HTMLElement, store: Store, controller: Cont
           h("span", { class: "nav-title" }, basename(project.path)),
           project.startingRevision === undefined ? null : h("span", { class: "nav-meta" }, project.startingRevision.slice(0, 7)),
         ),
-        // A collapsed folder summarizes its hidden sessions in place of the count.
-        !isOpen && hasWaiting
-          ? icon("hand", { className: "tree-count needs-approval", label: "A session needs your approval" })
-          : !isOpen && hasRunning
-            ? icon("circle-notch", { className: "tree-count spin", label: "Agent running" })
-            : h("span", { class: "tree-count" }, String(sessions.length)),
       ),
       iconButton("database", `Import local sessions into ${basename(project.path)}`, () => openSessionImport(project, controller), "tree-add"),
       iconButton("plus", `New session in ${basename(project.path)}`, () => {
         void controller.createSessionForProject(project.id);
       }, "tree-add"),
+      // Keep the session summary after the row actions. Collapsed folders
+      // summarize hidden activity in the same position as the session count.
+      !isOpen && hasWaiting
+        ? icon("hand", { className: "tree-count needs-approval", label: "A session needs your input" })
+        : !isOpen && hasRunning
+          ? icon("circle-notch", { className: "tree-count spin", label: "Agent running" })
+          : h("span", { class: "tree-count" }, String(sessions.length)),
     );
     group.append(folder);
     draggable(folder, "projects", project.id, order("projects", state.projects.map((candidate) => candidate.id)));
@@ -172,11 +207,11 @@ export function mountNavigator(root: HTMLElement, store: Store, controller: Cont
             class: [session.id === state.selection.sessionId ? "tree-item active" : "tree-item", isWaiting ? "needs-approval" : ""].join(" ").trim(),
             onClick: () => void controller.selectSession(session.id),
             title: isWaiting
-              ? `${session.title ?? "Session"} / waiting for your approval`
+              ? `${session.title ?? "Session"} / waiting for your input`
               : `${session.title ?? "Session"} / updated ${session.updatedAt}`,
           },
             isWaiting
-              ? icon("hand", { className: "nav-icon", label: "Waiting for your approval" })
+              ? icon("hand", { className: "nav-icon", label: "Waiting for your input" })
               : icon(isRunning ? "circle-notch" : "chat-circle-text", {
                 className: isRunning ? "nav-icon spin" : "nav-icon",
                 ...(isRunning ? { label: "Agent running" } : {}),
@@ -184,11 +219,18 @@ export function mountNavigator(root: HTMLElement, store: Store, controller: Cont
             h("span", { class: "nav-title" }, session.title ?? `Session ${shortId(session.id)}`),
             // Status is an icon plus a word: the age gives way to the request.
             isWaiting
-              ? h("span", { class: "nav-age approval-flag" }, "Needs approval")
+              ? h("span", { class: "nav-age approval-flag" }, "Needs input")
               : h("span", { class: "nav-age" }, relativeTime(session.updatedAt)),
           );
-          draggable(row, `sessions.${project.id}`, session.id, sessionIds);
-          return row;
+          const title = session.title ?? `Session ${shortId(session.id)}`;
+          const remove = iconButton("trash-simple", `Remove session: ${title}`, () => removeSession(session.id, title), "tree-remove");
+          remove.disabled = isRunning;
+          if (isRunning) remove.title = "Stop this session's active run before removing it.";
+          // Separate sibling buttons keep navigation and removal accessible
+          // without nesting interactive elements or selecting on removal.
+          const container = h("div", { class: "tree-session-row" }, row, remove);
+          draggable(container, `sessions.${project.id}`, session.id, sessionIds);
+          return container;
         }),
         sessions.length === 0
           ? h("p", { class: "empty tree-empty" }, "No sessions yet. Use + to start one.")
@@ -200,7 +242,7 @@ export function mountNavigator(root: HTMLElement, store: Store, controller: Cont
   }
 
   store.watch(
-    (state) => [state.projects, state.sessions, state.selection.sessionId, runningKey(state), waitingKey(state)],
+    (state) => [state.projects, state.sessions, state.selection.projectId, state.selection.sessionId, runningKey(state), waitingKey(state)],
     (_slice, state) => {
       const selectedSession = state.sessions.find((session) => session.id === state.selection.sessionId);
       if (selectedSession !== undefined && !expanded.has(selectedSession.projectId)) {
@@ -219,7 +261,7 @@ export function mountNavigator(root: HTMLElement, store: Store, controller: Cont
  */
 function waitingKey(state: AppState): string {
   return [...new Set(Object.values(state.live)
-    .filter((live) => live.pendingApprovals.length > 0)
+    .filter((live) => live.pendingApprovals.length > 0 || (live.pendingQuestions?.length ?? 0) > 0)
     .map((live) => live.run.sessionId))].sort().join("|");
 }
 

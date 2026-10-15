@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type { RuntimeModelInput } from "../../core/execution/types.js";
 import { CodexRuntimeAdapter } from "./codex.js";
+import type { UserQuestionResponse } from "../../core/execution/types.js";
 
 test("Codex applies native permission policy and reviewer on new/resumed threads and turns", async () => {
   for (const [mode, sandbox, approvalPolicy, approvalsReviewer] of [
@@ -59,6 +60,66 @@ test("Codex does not turn native automatic review into an interactive Rack appro
   assert.equal(last?.type, "failed");
   assert.match(last?.type === "failed" ? last.error : "", /native permission settings/);
   assert.equal(closed, true);
+});
+
+test("Codex routes questions by ID and keeps reading output while an answer is pending", { timeout: 2000 }, async () => {
+  let answer!: (response: UserQuestionResponse | null) => void;
+  const waiting = new Promise<UserQuestionResponse | null>((resolve) => { answer = resolve; });
+  let responded!: () => void;
+  const responseReady = new Promise<void>((resolve) => { responded = resolve; });
+  const responses: unknown[] = [];
+  let message = 0;
+  const adapter = new CodexRuntimeAdapter({ resolve: async () => ({ environment: {} }) }, { resolve: async () => ({ directory: "/context" }) }, { createProcess: () => ({
+    request: async (method) => method.startsWith("thread/") ? { thread: { id: "thread" } } : method === "turn/start" ? { turn: { id: "turn" } } : {},
+    notify: () => {}, respond: (id, result) => { responses.push({ id, result }); responded(); }, respondError: (_id, error) => { throw new Error(error); }, close: async () => {},
+    nextMessage: async () => {
+      if (message++ === 0) return { done: false, value: { id: "rpc-question", method: "item/tool/requestUserInput", params: {
+        threadId: "thread", turnId: "turn", isBlocking: false, questions: [{ id: "language", header: "Language", question: "Which language?", isOther: true, isSecret: false,
+          options: [{ label: "TypeScript", description: "Typed JavaScript" }] }],
+      } } };
+      if (message === 2) return { done: false, value: { method: "item/agentMessage/delta", params: { itemId: "message", delta: "Independent work" } } };
+      await responseReady;
+      return { done: false, value: { method: "turn/completed", params: { turn: { status: "completed" } } } };
+    },
+  }) });
+  const iterator = adapter.startRun({ runId: "run", attemptId: "attempt", sessionId: "session", projectPath: "/project", prompt: "test", permissionMode: "approve_for_me",
+    account: { accountId: "account", providerId: "codex", credential: { id: "credential", providerId: "codex", method: "native_login" }, runtimeContextId: "context" },
+    signal: new AbortController().signal, requestApproval: async () => { throw new Error("Not an approval"); },
+    requestQuestions: async (questions) => { assert.equal(questions[0]?.id, "language"); assert.equal(questions[0]?.allowCustom, true); return waiting; },
+  })[Symbol.asyncIterator]();
+  assert.equal((await iterator.next()).value?.type, "native_session");
+  const output = (await iterator.next()).value;
+  assert.equal(output?.type === "message_delta" && output.text, "Independent work");
+  assert.equal(responses.length, 0);
+  answer({ answers: { language: ["Rust"] } });
+  assert.equal((await iterator.next()).value?.type, "completed");
+  await iterator.next();
+  assert.deepEqual(responses, [{ id: "rpc-question", result: { answers: { language: { answers: ["Rust"] } } } }]);
+});
+
+test("Codex native resolution cancels its pending question without sending a stale response", { timeout: 2000 }, async () => {
+  let next = 0;
+  let aborted = false;
+  const responses: unknown[] = [];
+  const messages = [
+    { id: 7, method: "item/tool/requestUserInput", params: { threadId: "thread", turnId: "turn", questions: [{ id: "q", question: "Answer?", options: null, isOther: true, isSecret: true }] } },
+    { method: "serverRequest/resolved", params: { threadId: "thread", requestId: 7 } },
+    { method: "turn/completed", params: { turn: { status: "completed" } } },
+  ];
+  const adapter = new CodexRuntimeAdapter({ resolve: async () => ({ environment: {} }) }, { resolve: async () => ({ directory: "/context" }) }, { createProcess: () => ({
+    request: async (method) => method.startsWith("thread/") ? { thread: { id: "thread" } } : method === "turn/start" ? { turn: { id: "turn" } } : {},
+    notify: () => {}, respond: (_id, result) => { responses.push(result); }, respondError: (_id, error) => { responses.push(error); }, close: async () => {},
+    nextMessage: async () => ({ done: false, value: messages[next++]! }),
+  }) });
+  for await (const _event of adapter.startRun({ runId: "run", attemptId: "attempt", sessionId: "session", projectPath: "/project", prompt: "test", permissionMode: "full_access",
+    account: { accountId: "account", providerId: "codex", credential: { id: "c", providerId: "codex", method: "native_login" }, runtimeContextId: "ctx" },
+    signal: new AbortController().signal, requestApproval: async () => "deny", requestQuestions: async (questions, signal) => {
+      assert.equal(questions[0]?.isSecret, true);
+      return new Promise((resolve) => signal!.addEventListener("abort", () => { aborted = true; resolve(null); }, { once: true }));
+    },
+  })) { /* Drain. */ }
+  assert.equal(aborted, true);
+  assert.deepEqual(responses, []);
 });
 
 test("Codex model discovery paginates, hides entries, and closes the process", async () => {

@@ -25,10 +25,11 @@ import {
 } from "../../contracts/desktop/commands.js";
 import type { HostEvent } from "../../contracts/desktop/events.js";
 import { ATTACHMENT_KINDS, IPC_CHANNELS, type AttachmentKind, type CommandResponse, type OpenPathResult } from "../../contracts/desktop/transport.js";
-import { ContractValidationError, object, oneOf, optional, text } from "../../contracts/desktop/validation.js";
+import { boolean, integer, ContractValidationError, object, oneOf, optional, text } from "../../contracts/desktop/validation.js";
 import { HostProcess } from "./host-process.js";
 import { classifyOpenPath } from "./open-path.js";
 import { createMainWindow } from "./window.js";
+import { SharedBrowser } from "./shared-browser.js";
 
 /** How long quitting waits for cancelled runs to record a terminal state. */
 const SHUTDOWN_TIMEOUT_MS = 10_000;
@@ -42,8 +43,10 @@ const paths = {
 
 let host: HostProcess | undefined;
 let quitConfirmed = false;
+const sharedBrowser = new SharedBrowser();
 
 function broadcast(event: HostEvent): void {
+  if (event.type === "sessions.removed") sharedBrowser.close(event.sessionId);
   for (const window of BrowserWindow.getAllWindows()) {
     window.webContents.send(IPC_CHANNELS.event, event);
   }
@@ -93,6 +96,11 @@ const validateSelectDirectory = object({
   defaultPath: optional(text({ maxLength: 4096 })),
 });
 
+const validateBrowserPresentation = object({
+  sessionId: optional(text({ maxLength: 200 })), visible: boolean,
+  bounds: optional(object({ x: integer(0, 20_000), y: integer(0, 20_000), width: integer(0, 20_000), height: integer(0, 20_000) })),
+});
+
 /**
  * Shows the native folder picker as a sheet/modal of the calling window.
  * Returns the chosen absolute path, or `undefined` on cancel or rejection.
@@ -124,6 +132,28 @@ const validateOpenPath = object({
   path: text({ maxLength: 4096 }),
   base: optional(text({ maxLength: 4096 })),
 });
+
+const validateTimelineWindow = object({
+  scope: oneOf(["project", "session"]),
+  contextId: text({ maxLength: 200 }), checkpointId: text({ maxLength: 200 }),
+  path: optional(text({ maxLength: 4096 })),
+});
+
+/**
+ * Opens only the bundled viewer and only after the host resolves the selected
+ * checkpoint. No renderer-provided URL, file path or Git revision is loaded.
+ * Each viewer stays pinned to its own context when the main window navigates.
+ */
+async function handleTimelineWindow(event: IpcMainInvokeEvent, request: unknown): Promise<CommandResponse<null>> {
+  if (!isTrustedSender(event)) return { ok: false, error: { code: "invalid_input", name: "UntrustedSenderError", message: "Request rejected." } };
+  let target: ReturnType<typeof validateTimelineWindow>;
+  try { target = validateTimelineWindow(request, ""); }
+  catch { return { ok: false, error: { code: "invalid_input", name: "InvalidTimelineWindow", message: "Invalid snapshot window request." } }; }
+  const result = await handleInvoke(event, "timeline.snapshot", { scope: target.scope, contextId: target.contextId, checkpointId: target.checkpointId });
+  if (!result.ok) return result;
+  createMainWindow({ preloadPath: paths.preload, indexPath: paths.index, timeline: target });
+  return { ok: true, value: null };
+}
 
 const FILE_FILTERS: Record<AttachmentKind, Electron.FileFilter> = {
   images: { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tif", "tiff", "heic", "avif"] },
@@ -194,9 +224,11 @@ async function stopHostForQuit(current: HostProcess): Promise<boolean> {
     if (response !== 0) {
       return false;
     }
-    await current.shutdown(SHUTDOWN_TIMEOUT_MS);
   }
+  // Interactive terminals also need orderly shutdown when no model run is active.
+  await current.shutdown(SHUTDOWN_TIMEOUT_MS);
   current.kill();
+  sharedBrowser.shutdown();
   return true;
 }
 
@@ -231,6 +263,12 @@ void app.whenReady().then(() => {
   ipcMain.handle(IPC_CHANNELS.selectDirectory, handleSelectDirectory);
   ipcMain.handle(IPC_CHANNELS.selectFiles, handleSelectFiles);
   ipcMain.handle(IPC_CHANNELS.openPath, handleOpenPath);
+  ipcMain.handle(IPC_CHANNELS.openTimelineWindow, handleTimelineWindow);
+  ipcMain.handle(IPC_CHANNELS.presentBrowser, (event, request: unknown) => {
+    if (!isTrustedSender(event)) return;
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (owner !== null) sharedBrowser.present(owner, validateBrowserPresentation(request, ""));
+  });
   // THINKING_AND_CODE_DATA_DIR isolates development or test data from the
   // default `~/.thinking-and-code` directory used by the host.
   const dataDirectory = process.env["THINKING_AND_CODE_DATA_DIR"];
@@ -238,7 +276,12 @@ void app.whenReady().then(() => {
     modulePath: paths.host,
     args: dataDirectory === undefined || dataDirectory === "" ? [] : [`--data-directory=${dataDirectory}`],
     onEvent: broadcast,
+    onBrowserRequest: (sessionId, request) => {
+      const params = validateCommandParams("browser.control", { sessionId, request });
+      return sharedBrowser.control(params.sessionId, params.request);
+    },
     onExit: (code) => {
+      sharedBrowser.shutdown();
       broadcast({ type: "host.status", status: "exited", detail: `Execution host exited with code ${code}.` });
     },
   });

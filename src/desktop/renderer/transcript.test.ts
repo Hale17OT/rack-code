@@ -14,6 +14,16 @@ test("adjacent message deltas are coalesced; tools break the run of text", () =>
   assert.equal(state.items[0]?.kind === "text" && state.items[0].text, "Hello");
 });
 
+test("pending questions stay in the composer and resolved answers have readable durable transcript entries", () => {
+  const pending = applyEvent(EMPTY_TRANSCRIPT, { type: "question_request", request: { id: "request", questions: [
+    { id: "q", question: "Which format?", options: [], allowCustom: true, multiSelect: false },
+  ] } });
+  assert.equal(pending.items.length, 0);
+  const answered = applyEvent(pending, { type: "question_resolved", requestId: "request", response: { answers: { q: ["Short"] } } });
+  assert.deepEqual(answered.items, [{ kind: "status", label: "Questions answered", detail: "Which format?\nShort" }]);
+  assert.deepEqual(answered.questions, {});
+});
+
 test("thinking deltas are folded into a separate trace and approvals stay out of chat", () => {
   const state = foldEvents([
     { type: "thinking_delta", text: "check " },

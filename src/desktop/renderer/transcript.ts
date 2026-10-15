@@ -18,7 +18,7 @@
  *   `pendingApprovals` and the composer renders them above the prompt.
  * - usage fields that were not reported stay `undefined`, never zero.
  */
-import type { RuntimeEvent } from "../../contracts/desktop/views.js";
+import type { RuntimeEvent, UserQuestionRequest } from "../../contracts/desktop/views.js";
 
 export type TranscriptItem =
   | { readonly kind: "text"; readonly text: string }
@@ -34,6 +34,7 @@ export interface UsageSummary {
 }
 
 export interface TranscriptState {
+  readonly questions?: Readonly<Record<string, UserQuestionRequest>>;
   readonly items: readonly TranscriptItem[];
   readonly usage?: UsageSummary;
   readonly nativeSessionId?: string;
@@ -45,6 +46,16 @@ export const EMPTY_TRANSCRIPT: TranscriptState = { items: [] };
 
 export function applyEvent(state: TranscriptState, event: RuntimeEvent): TranscriptState {
   switch (event.type) {
+    case "question_request":
+      return { ...state, questions: { ...state.questions, [event.request.id]: event.request } };
+    case "question_resolved": {
+      const request = state.questions?.[event.requestId];
+      if (request === undefined) return state;
+      const { [event.requestId]: _finished, ...questions } = state.questions ?? {};
+      return { ...state, questions, items: [...state.items, { kind: "status",
+        label: event.response === null ? "Questions dismissed" : "Questions answered",
+        detail: request.questions.map((question) => `${question.question}\n${event.response?.answers[question.id]?.join(", ") ?? "Dismissed"}`).join("\n\n") }] };
+    }
     case "message_delta": {
       const last = state.items.at(-1);
       if (last?.kind === "text") {

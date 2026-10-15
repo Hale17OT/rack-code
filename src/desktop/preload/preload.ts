@@ -17,6 +17,8 @@ const bridge: HarnessBridge = {
   selectDirectory: (options) => ipcRenderer.invoke(IPC_CHANNELS.selectDirectory, options),
   selectFiles: (kind) => ipcRenderer.invoke(IPC_CHANNELS.selectFiles, kind),
   openPath: (request) => ipcRenderer.invoke(IPC_CHANNELS.openPath, request),
+  openTimelineWindow: (request) => ipcRenderer.invoke(IPC_CHANNELS.openTimelineWindow, request),
+  presentBrowser: (request) => ipcRenderer.invoke(IPC_CHANNELS.presentBrowser, request),
   onEvent: (listener) => {
     const handler = (_event: IpcRendererEvent, payload: HostEvent) => listener(payload);
     ipcRenderer.on(IPC_CHANNELS.event, handler);

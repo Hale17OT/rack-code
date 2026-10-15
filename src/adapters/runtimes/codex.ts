@@ -15,6 +15,10 @@ import type {
   RuntimeRunInput,
 } from "../../core/execution/types.js";
 import { JsonRpcProcess, type JsonRpcMessage } from "./json-rpc-process.js";
+import { nativeQuestions } from "./user-questions.js";
+import type { NativeTerminalInput, TerminalProcess } from "../../core/execution/terminal.js";
+import { startAppToolServer } from "./app-tool-server.js";
+import { StringDecoder } from "node:string_decoder";
 
 type CodexProcessFactory = (options: {
   readonly cwd: string;
@@ -163,6 +167,65 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
   }
 
+  /** Reuses Codex's documented PTY controls, with an isolated account context
+   * and no thread/model turn. Manual terminal input is user-owned execution.
+   */
+  async openTerminal(input: NativeTerminalInput): Promise<TerminalProcess> {
+    const credential = await this.credentials.resolve(input.account.credential);
+    const context = await this.contexts.resolve(input.account.runtimeContextId);
+    const child = this.createProcess({ cwd: input.cwd, environment: { ...process.env, ...context.environment, ...credential.environment, CODEX_HOME: context.directory } });
+    let closed = false;
+    const decoder = new StringDecoder("utf8");
+    try {
+      await child.request("initialize", { clientInfo: { name: "thinking-and-code", title: "Rack Terminal", version: "0.1.0" }, capabilities: { experimentalApi: true } });
+      child.notify("initialized", {});
+      const processId = "rack-terminal";
+      let ready!: () => void;
+      let fail!: (error: unknown) => void;
+      const startup = new Promise<void>((resolve, reject) => { ready = resolve; fail = reject; });
+      void startup.catch(() => {});
+      void (async () => {
+        while (!closed) {
+          const next = await child.nextMessage();
+          if (next.done) break;
+          if (next.value.method === "command/exec/outputDelta") {
+            const data = asRecord(next.value.params);
+            // Protocol chunks are bytes and can split a Unicode character.
+            if (data.processId === processId && typeof data.deltaBase64 === "string") { input.onData(decoder.write(Buffer.from(data.deltaBase64, "base64"))); ready(); }
+          }
+        }
+      })().catch((error: unknown) => { if (!closed) { fail(error); input.onExit(1); } });
+      const completion = child.request("command/exec", {
+        command: [process.env["SHELL"] ?? "/bin/sh", "-l"], processId, tty: true, streamStdoutStderr: true,
+        disableTimeout: true, disableOutputCap: true, cwd: input.cwd, size: { cols: input.cols, rows: input.rows },
+        sandboxPolicy: { type: "dangerFullAccess" },
+      });
+      void completion.then((result) => { if (!closed) { ready(); input.onData(decoder.end()); input.onExit(Number(asRecord(result).exitCode ?? 0)); } }, (error: unknown) => {
+        if (!closed) { fail(error); input.onData(`\r\n${error instanceof Error ? error.message : String(error)}\r\n`); input.onExit(1); }
+      });
+      // Unsupported command APIs normally reject immediately. Don't wait for
+      // a prompt forever when a shell's startup scripts produce no output.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try { await Promise.race([startup, new Promise<void>((resolve) => { timer = setTimeout(resolve, 500); })]); }
+      finally { clearTimeout(timer); }
+      return {
+        write: async (data) => { await child.request("command/exec/write", { processId, deltaBase64: Buffer.from(data).toString("base64") }); },
+        resize: async (cols, rows) => { await child.request("command/exec/resize", { processId, size: { cols, rows } }); },
+        close: async () => {
+          if (closed) return;
+          closed = true;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            // A crashed server may never acknowledge termination. Closing the
+            // connection also terminates its connection-owned command.
+            await Promise.race([child.request("command/exec/terminate", { processId }).catch(() => {}),
+              new Promise<void>((resolve) => { timer = setTimeout(resolve, 1000); })]);
+          } finally { clearTimeout(timer); await child.close(); }
+        },
+      };
+    } catch (error) { closed = true; await child.close(); throw error; }
+  }
+
   private async *run(input: RuntimeRunInput, resume: boolean): AsyncIterable<RuntimeEvent> {
     const credential = await this.credentials.resolve(input.account.credential);
     const context = await this.contexts.resolve(input.account.runtimeContextId);
@@ -177,6 +240,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     let turnId: string | undefined;
     let assistantText = "";
     const eventState = { thinking: new Map<string, string>(), messages: new Map<string, string>() };
+    const questionRequests = new Map<string, AbortController>();
+    let appTools: Awaited<ReturnType<typeof startAppToolServer>>;
 
     try {
       await childProcess.request("initialize", {
@@ -185,13 +250,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           title: "Thinking and Code",
           version: "0.1.0",
         },
-        capabilities: {},
+        capabilities: { experimentalApi: true },
       });
       childProcess.notify("initialized", {});
 
+      appTools = await startAppToolServer(input.tools ?? [], input.signal);
+      const toolConfig = appTools === undefined ? {} : { config: { mcp_servers: { rack: {
+        url: appTools.url, http_headers: { Authorization: `Bearer ${appTools.token}` }, tool_timeout_sec: 3600,
+      } } } };
       const threadResponse = resume
-        ? await childProcess.request("thread/resume", this.threadResumeParams(input))
-        : await childProcess.request("thread/start", this.threadStartParams(input));
+        ? await childProcess.request("thread/resume", { ...this.threadResumeParams(input), ...toolConfig })
+        : await childProcess.request("thread/start", { ...this.threadStartParams(input), ...toolConfig });
       threadId = readString(threadResponse, ["thread", "id"])
         ?? input.continuation?.nativeSessionId;
       if (threadId === undefined) {
@@ -230,11 +299,36 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         }
         const message = next.value;
         if (message.id !== undefined && message.method !== undefined) {
+          if (message.method === "item/tool/requestUserInput" || message.method === "tool/requestUserInput") {
+            const params = asRecord(message.params);
+            const id = message.id;
+            const key = JSON.stringify(id);
+            const request = new AbortController();
+            questionRequests.set(key, request);
+            // Do not park the notification reader. Nonblocking questions can
+            // coexist with output, and native resolution must clear the UI.
+            void (async () => {
+              if (params.threadId !== threadId || params.turnId !== turnId) throw new Error("Question does not belong to the active turn.");
+              const questions = nativeQuestions(params, "codex");
+              const response = await input.requestQuestions?.(questions, AbortSignal.any([input.signal, request.signal])) ?? null;
+              if (questionRequests.get(key) !== request || request.signal.aborted || input.signal.aborted) return;
+              childProcess.respond(id, { answers: Object.fromEntries(questions.filter((question) => response?.answers[question.id] !== undefined)
+                .map((question) => [question.id, { answers: response!.answers[question.id] }])) });
+            })().catch((error: unknown) => {
+              if (questionRequests.get(key) === request && !request.signal.aborted) childProcess.respondError(id, error instanceof Error ? error.message : String(error));
+            }).finally(() => { if (questionRequests.get(key) === request) questionRequests.delete(key); });
+            continue;
+          }
           yield* await this.handleServerRequest(childProcess, message, input);
           continue;
         }
         if (message.method === undefined) {
           continue;
+        }
+        if (message.method === "serverRequest/resolved") {
+          const key = JSON.stringify(asRecord(message.params).requestId);
+          questionRequests.get(key)?.abort();
+          questionRequests.delete(key);
         }
         const events = mapCodexNotification(message.method, message.params, eventState);
         for (const event of events) {
@@ -262,8 +356,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         yield { type: "failed", error: error instanceof Error ? error.message : String(error) };
       }
     } finally {
+      for (const request of questionRequests.values()) request.abort();
+      questionRequests.clear();
       this.active.delete(input.attemptId);
       await childProcess.close();
+      await appTools?.close();
     }
   }
 

@@ -82,6 +82,17 @@ class BlockingRuntime extends ApprovalRuntime {
   }
 }
 
+class QuestionRuntime extends ApprovalRuntime {
+  override readonly runtimeId = "question-runtime";
+  override async *startRun(input: RuntimeRunInput): AsyncIterable<RuntimeEvent> {
+    yield { type: "native_session", nativeSessionId: "question-native" };
+    const response = await input.requestQuestions!([{ id: "format", question: "Which format?", options: [{ label: "Short" }, { label: "Long" }], multiSelect: false, allowCustom: true }]);
+    if (response === null) { yield { type: "interrupted" }; return; }
+    yield { type: "message_delta", text: response.answers["format"]!.join(", ") };
+    yield { type: "completed", result: "answered" };
+  }
+}
+
 /**
  * Connector whose sign-in is driven by the test: it reports a browser URL
  * and asks for a code, then completes with the identity the code names.
@@ -111,13 +122,14 @@ class FakeConnector implements AccountConnector {
   }
 }
 
-async function setup() {
+async function setup(withQuestions = false) {
   const accounts = new AccountsService(new InMemoryAccountStore());
   const projects = new ProjectsService(new InMemoryProjectStore());
   const sessions = new SessionsService(new InMemorySessionStore());
   const runtimes = new RuntimeRegistry();
   runtimes.register(new ApprovalRuntime());
   runtimes.register(new BlockingRuntime());
+  if (withQuestions) runtimes.register(new QuestionRuntime());
   const execution = new ExecutionService(new InMemoryExecutionStore(), accounts, sessions, projects, runtimes);
   const connector = new FakeConnector();
   const connections = new ConnectionsService(
@@ -147,6 +159,40 @@ async function setup() {
   });
   return { api, call, events, accounts, connector, project, session, account };
 }
+
+test("removal waits for a concurrent start, rejects active sessions, then preserves the settled audit", { timeout: 3000 }, async () => {
+  const { api, call, events, project, session, account } = await setup();
+  const other = await call<{ id: string }>("sessions.create", { projectId: project.id });
+  const params = { projectId: project.id, sessionId: session.id, providerId: "fake", runtimeId: "blocking-runtime",
+    accountId: account.id, prompt: "wait", permissionMode: "full_access" };
+  const starting = call<{ run: { id: string } }>("runs.start", params);
+  const removal = api.dispatch("sessions.remove", { sessionId: session.id });
+  const [started, busy] = await Promise.all([starting, removal]);
+  assert.equal(!busy.ok && busy.error.code, "session_busy");
+  assert.equal((await call<{ id: string }>("sessions.get", { sessionId: session.id })).id, session.id);
+  await call("runs.cancel", { runId: started.run.id });
+  await waitFor(events, (event) => event.type === "run.finished");
+  await call("sessions.remove", { sessionId: session.id });
+  assert.deepEqual((await call<Array<{ id: string }>>("sessions.list")).map((entry) => entry.id), [other.id]);
+  const missing = await api.dispatch("sessions.get", { sessionId: session.id });
+  assert.equal(!missing.ok && missing.error.code, "session_not_found");
+  assert.ok(events.some((event) => event.type === "sessions.removed" && event.sessionId === session.id));
+  assert.ok((await call<unknown[]>("runs.journal", { runId: started.run.id })).length > 0);
+  const anotherStart = await api.dispatch("runs.start", params);
+  assert.equal(!anotherStart.ok && anotherStart.error.code, "session_not_found");
+});
+
+test("a start queued after removal cannot resurrect the deleted session", async () => {
+  const { api, call, project, session, account } = await setup();
+  const removal = call("sessions.remove", { sessionId: session.id });
+  const starting = api.dispatch("runs.start", { projectId: project.id, sessionId: session.id, providerId: "fake",
+    runtimeId: "blocking-runtime", accountId: account.id, prompt: "wait", permissionMode: "full_access" });
+  await removal;
+  const result = await starting;
+  assert.equal(!result.ok && result.error.code, "session_not_found");
+  assert.deepEqual(await call("runs.list", { sessionId: session.id }), []);
+  assert.deepEqual(await call("runs.active"), []);
+});
 
 function waitFor(events: HostEvent[], predicate: (event: HostEvent) => boolean): Promise<HostEvent> {
   return new Promise((resolve) => {
@@ -303,6 +349,39 @@ test("starting on a busy project returns project_busy with the owning attempt", 
   const finished = await waitFor(events, (event) => event.type === "run.finished");
   assert.equal(finished.type === "run.finished" && finished.run.status, "interrupted");
   assert.equal(events.filter((event) => event.type === "run.cancel_requested").length, 1);
+});
+
+test("pending questions survive client snapshots and answer through the host in automatic permission mode", { timeout: 3000 }, async () => {
+  const { api, call, events, project, session, account } = await setup(true);
+  const { run } = await call<{ run: { id: string } }>("runs.start", { sessionId: session.id, projectId: project.id, providerId: "fake", runtimeId: "question-runtime",
+    accountId: account.id, prompt: "ask", permissionMode: "approve_for_me" });
+  await waitFor(events, (event) => event.type === "run.event" && event.event.type === "question_request");
+  const [active] = await call<Array<{ pendingQuestions: Array<{ id: string; questions: unknown[] }> }>>("runs.active");
+  assert.equal(active?.pendingQuestions.length, 1);
+  const requestId = active!.pendingQuestions[0]!.id;
+  const invalid = await api.dispatch("runs.respondToQuestions", { runId: run.id, requestId, response: { answers: { wrong: ["Short"] } } });
+  assert.equal(!invalid.ok && invalid.error.code, "invalid_input");
+  await call("runs.respondToQuestions", { runId: run.id, requestId, response: { answers: { format: ["My own format"] } } });
+  const finished = await waitFor(events, (event) => event.type === "run.finished");
+  assert.equal(finished.type === "run.finished" && finished.run.status, "completed");
+  assert.deepEqual(await call("runs.active"), []);
+  const journal = await call<Array<{ type: string }>>("runs.journal", { runId: run.id });
+  assert.equal(journal.filter((entry) => entry.type === "question_request").length, 1);
+  assert.equal(journal.filter((entry) => entry.type === "question_resolved").length, 1);
+  assert.ok(events.some((event) => event.type === "run.event" && event.event.type === "question_resolved"));
+});
+
+test("cancelling a run settles pending questions and releases the project writer", { timeout: 3000 }, async () => {
+  const { call, events, project, session, account } = await setup(true);
+  const { run } = await call<{ run: { id: string } }>("runs.start", { sessionId: session.id, projectId: project.id, providerId: "fake", runtimeId: "question-runtime",
+    accountId: account.id, prompt: "ask", permissionMode: "full_access" });
+  await waitFor(events, (event) => event.type === "run.event" && event.event.type === "question_request");
+  await call("runs.cancel", { runId: run.id });
+  const finished = await waitFor(events, (event) => event.type === "run.finished");
+  assert.equal(finished.type === "run.finished" && finished.run.status, "interrupted");
+  assert.deepEqual(await call("runs.active"), []);
+  const [saved] = await call<Array<{ activeWriterAttemptId?: string }>>("projects.list");
+  assert.equal(saved?.activeWriterAttemptId, undefined);
 });
 
 test("shutdown cancels active runs and waits for terminal states", async () => {

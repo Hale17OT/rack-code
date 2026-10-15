@@ -24,6 +24,8 @@ import type { AppState, LiveRun, Store } from "../store.js";
 import { accountLabel, isActiveStatus, PERMISSION_LABELS } from "./run-format.js";
 import { presentTool } from "./tool-presentation.js";
 import { createAttachmentPicker } from "./attachments.js";
+import { modelKey } from "../components/model-settings.js";
+import { createQuestionRequests } from "./user-questions.js";
 
 type AccountChoice = `auto:${string}` | `account:${string}:${string}`;
 
@@ -32,7 +34,7 @@ const MODE_ICONS: Readonly<Record<PermissionMode, Parameters<typeof icon>[0]>> =
 };
 
 export function mountComposer(root: HTMLElement, store: Store, controller: Controller): void {
-  let mode: PermissionMode = "ask";
+  let mode: PermissionMode = "approve_for_me";
   let submitting = false;
   const attachments = createAttachmentPicker(controller, () => refresh(store.get()));
 
@@ -45,7 +47,7 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
     formatValue: (option) => option.label.toLowerCase() === "auto" ? "Auto" : option.label,
     onChange: () => refresh(store.get()),
   });
-  const model = createModelPicker(() => refresh(store.get()));
+  const model = createModelPicker(() => refresh(store.get()), () => controller.openSettings("models"));
 
   const connectPill = h("button", {
     class: "dropdown dropdown-pill", type: "button",
@@ -61,6 +63,7 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
     event.preventDefault();
     void submitOrStop();
   } },
+    createQuestionRequests(store, controller),
     guard,
     h("div", { class: "composer-card" },
       attachments.list,
@@ -148,7 +151,11 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
   }
 
   function canRun(state: AppState): boolean {
-    return state.session !== undefined && state.selection.sessionId === state.session.id && state.host.status === "ready" && model.selected !== undefined &&
+    const selected = model.selected;
+    // Settings updates synchronously, while DOM watchers run next frame. Check
+    // the current preference here too, so an unstarred model cannot be sent
+    // through a stale picker during that interval.
+    return state.session !== undefined && state.selection.sessionId === state.session.id && state.host.status === "ready" && selected !== undefined && state.favoriteModelKeys.includes(modelKey(selected)) &&
       account.value !== undefined && unacknowledgedUnknown(state) === undefined && !modeDisabled(capabilitiesFor(state));
   }
 
@@ -182,7 +189,7 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
   function refresh(state: AppState): void {
     const activeId = activeRunId(state);
     if (activeId !== undefined) mode = state.live[activeId]!.run.permissionMode;
-    model.update(state.models);
+    model.update(state.models, state.favoriteModelKeys);
     const selected = selectedModel();
     const targetProvider = selected?.providerId;
     const accounts = targetProvider === undefined ? [] : state.accounts.filter((entry) => entry.providerId === targetProvider);
@@ -200,7 +207,7 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
       })),
     ];
     account.element.hidden = accountOptions.length === 0;
-    connectPill.hidden = accountOptions.length > 0;
+    connectPill.hidden = accountOptions.length > 0 || (selected === undefined && state.accounts.length > 0);
     const currentAccount = account.value;
     const accountStillValid = currentAccount !== undefined && accountOptions.some((option) => option.value === currentAccount);
     account.setOptions(accountOptions, accountStillValid ? currentAccount : (targetProvider === undefined ? undefined : `auto:${targetProvider}`));
@@ -216,18 +223,22 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
     const unknownRunId = unacknowledgedUnknown(state);
     const approvals = pendingApprovals(state);
     const catalogMessage = modelCatalogMessage(state);
+    const needsFavorites = state.models.length > 0 && selected === undefined;
     replace(guard,
       ...approvals.map(({ run, live, request }) => renderApproval(request, run, live, state, controller)),
       ...(catalogMessage === undefined ? [] : [
         h("div", { class: "guard-warning catalog-warning" }, icon("info"), h("span", {}, catalogMessage)),
       ]),
+      ...(needsFavorites ? [h("div", { class: "guard-warning" }, icon("star"),
+        h("span", {}, state.favoriteModelKeys.length === 0 ? "Star models in Settings to use them here." : "Your starred models are currently unavailable."),
+        h("button", { class: "button button-small", type: "button", onClick: () => controller.openSettings("models") }, "Choose favorites"))] : []),
       ...(unknownRunId === undefined ? [] : [
         h("div", { class: "guard-warning" }, icon("warning-circle"),
           h("span", {}, "The last run ended with an unknown outcome. Review its details before continuing; nothing is replayed automatically."),
           h("button", { class: "button button-small", type: "button", onClick: () => controller.acknowledgeUnknown(unknownRunId) }, "I reviewed it")),
       ]),
     );
-    guard.hidden = approvals.length === 0 && catalogMessage === undefined && unknownRunId === undefined;
+    guard.hidden = approvals.length === 0 && catalogMessage === undefined && !needsFavorites && unknownRunId === undefined;
     guard.classList.toggle("approval-open", approvals.length > 0);
 
     const noSession = state.session === undefined || state.selection.sessionId !== state.session.id || state.host.status !== "ready";
@@ -238,7 +249,7 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
     // the picker truthful while active instead of showing a future setting.
     permission.setDisabled(noSession || activeId !== undefined);
     account.setDisabled(noSession);
-    model.setDisabled(noSession || state.models.length === 0 || submitting);
+    model.setDisabled(noSession || submitting);
 
     const active = activeRunId(state);
     if (active !== undefined) {
@@ -255,7 +266,7 @@ export function mountComposer(root: HTMLElement, store: Store, controller: Contr
   }
 
   store.watch(
-    (state) => [state.models, state.modelCatalogFailures, state.runtimes, state.accounts, state.capabilities, state.session, state.selection.sessionId, state.runs, state.live, state.acknowledgedUnknown, state.host, activeKey(state)],
+    (state) => [state.models, state.favoriteModelKeys, state.modelCatalogFailures, state.runtimes, state.accounts, state.capabilities, state.session, state.selection.sessionId, state.runs, state.live, state.acknowledgedUnknown, state.host, activeKey(state)],
     (_slice, state) => refresh(state),
   );
 }
@@ -269,7 +280,7 @@ function modelCatalogMessage(state: AppState): string | undefined {
     return "No models are available. Check the connected provider accounts and try again.";
   }
   const count = state.modelCatalogFailures.length;
-  return `${count} connected account${count === 1 ? "" : "s"} could not load its model list. Showing the models that were found.`;
+  return `${count} connected account${count === 1 ? "" : "s"} could not load its model list. Your available favorites are shown.`;
 }
 
 function pendingApprovals(state: AppState): readonly { readonly run: RunView; readonly live: LiveRun; readonly request: ApprovalRequest }[] {

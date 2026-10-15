@@ -11,6 +11,8 @@
  * Node.js services.
  */
 import type { AccountAvailability, AccountIdentity } from "../../core/accounts/types.js";
+import type { UserQuestionRequest } from "../../core/execution/question-types.js";
+export type { UserQuestion, UserQuestionRequest, UserQuestionResponse } from "../../core/execution/question-types.js";
 import type {
   ApprovalRequest,
   AttemptRecord,
@@ -26,6 +28,24 @@ export type { ProjectChanges, ProjectChangeFile, ProjectChangeGroup, ProjectChan
 import type { ConnectView } from "../../core/connections/types.js";
 import type { SessionMessage, SessionRecord } from "../../core/sessions/types.js";
 export type { SessionDiscovery, ExternalSessionSnapshot, ImportSessionResult, DiscoveredSession } from "../../core/session-imports/types.js";
+// Optional Timeline feature read models; type-only, safe for the renderer bundle.
+export type {
+  TimelineChangedPath,
+  TimelineChangeStatus,
+  TimelineCheckpointEntry,
+  TimelineCheckpointList,
+  TimelineProjectHistory,
+  TimelineProjectHistoryEntry,
+  TimelineFileDiff,
+  TimelineStatus,
+  TimelineSnapshotTarget,
+  TimelineSnapshotChoice,
+  TimelineSnapshotHistory,
+  TimelineSnapshot,
+  TimelineSnapshotFile,
+  TimelineSnapshotFileView,
+  TimelineFileContent,
+} from "../../features/timeline/types.js";
 
 export type {
   AccountAvailability,
@@ -122,6 +142,7 @@ export interface ActiveRunView {
   readonly run: RunView;
   readonly events: readonly RuntimeEvent[];
   readonly pendingApprovals: readonly ApprovalRequest[];
+  readonly pendingQuestions?: readonly UserQuestionRequest[];
   readonly cancelRequested: boolean;
   /** Provider's selected account at start time, when it differed from the account used. */
   readonly fallbackFromAccountId?: string;

@@ -2,16 +2,17 @@
  * Surfaces that can open in the right panel.
  *
  * "Changes" is a core surface and always listed. Plugin surfaces appear in
- * the panel's launcher only when enabled in Settings > Plugins. Every
- * plugin listed here is a preview: enabling it adds a placeholder surface,
- * and none of them has functionality yet. The architecture's optional
- * features (timeline, retrospective, orchestration) and the requested
- * browser and terminal are the planned candidates.
+ * the panel's launcher only when enabled in Settings > Plugins. Plugins
+ * marked `preview` add a placeholder surface with no functionality yet.
+ * Timeline, Browser, Terminal and Files are functional. Retrospective and
+ * orchestration remain previews.
  *
- * Enablement is a renderer preference stored per device. When plugins gain
- * real host-side behavior, the toggle must move to the host so composition
- * can validate dependencies, as the architecture describes for optional
- * features.
+ * Enablement is a renderer preference stored per device and only controls
+ * whether the surface is offered. Timeline has automatic project observers
+ * with host-owned Pause/Resume plus independently opted-in session chains;
+ * hiding the surface does not stop either. Moving this toggle to the host (so
+ * composition can validate dependencies and stop workers, as the
+ * architecture describes) remains open; see docs/timeline.md.
  */
 import type { IconName } from "./icons.js";
 
@@ -23,17 +24,19 @@ export interface SurfaceDefinition {
   readonly shortcut: string;
   readonly kind: "core" | "plugin";
   readonly description: string;
+  /** Placeholder plugin without functionality; shows a "Preview" tag. */
+  readonly preview?: boolean;
 }
 
 export const SURFACES: readonly SurfaceDefinition[] = [
   { id: "changes", title: "Changes", icon: "git-diff", shortcut: "D", kind: "core", description: "Current project changes and Git diffs." },
   { id: "run-details", title: "Run details", icon: "list-bullets", shortcut: "R", kind: "core", description: "Run status, account, model, permissions and journal." },
-  { id: "terminal", title: "Terminal", icon: "terminal-window", shortcut: "T", kind: "plugin", description: "A terminal presentation of this harness." },
-  { id: "browser", title: "Browser", icon: "globe", shortcut: "B", kind: "plugin", description: "A browser shared between you and the agent." },
-  { id: "files", title: "Files", icon: "files", shortcut: "F", kind: "plugin", description: "Browse the files of the current project." },
-  { id: "timeline", title: "Timeline", icon: "clock-counter-clockwise", shortcut: "L", kind: "plugin", description: "Project history across runs and code changes." },
-  { id: "retrospective", title: "Retrospective", icon: "lightbulb", shortcut: "R", kind: "plugin", description: "Post-run analysis and environment observations." },
-  { id: "orchestration", title: "Orchestration", icon: "flow-arrow", shortcut: "O", kind: "plugin", description: "Multi-stage workflows across models and providers." },
+  { id: "terminal", title: "Terminal", icon: "terminal-window", shortcut: "T", kind: "plugin", description: "Interactive project shell, using provider controls when available." },
+  { id: "browser", title: "Browser", icon: "globe", shortcut: "B", kind: "plugin", description: "A live browser shared between you and the agent." },
+  { id: "files", title: "Files", icon: "files", shortcut: "F", kind: "plugin", description: "Browse, edit and save project files." },
+  { id: "timeline", title: "Timeline", icon: "clock-counter-clockwise", shortcut: "L", kind: "plugin", description: "Project history and automatic file change recording." },
+  { id: "retrospective", title: "Retrospective", icon: "lightbulb", shortcut: "R", kind: "plugin", preview: true, description: "Post-run analysis and environment observations." },
+  { id: "orchestration", title: "Orchestration", icon: "flow-arrow", shortcut: "O", kind: "plugin", preview: true, description: "Multi-stage workflows across models and providers." },
 ];
 
 const STORAGE_KEY = "plugins.enabled";

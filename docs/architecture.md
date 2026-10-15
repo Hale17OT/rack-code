@@ -1,8 +1,8 @@
 # Architecture
 
-Status: evolving architecture with the headless MVP foundation and first desktop UI implemented, updated 2026-10-14.
+Status: evolving architecture with the headless MVP foundation and desktop UI implemented, updated 2026-10-15.
 
-This document is the architecture entry point required by [AGENTS.md](../AGENTS.md). It captures the agreed product direction and the boundaries used by the implemented headless MVP and desktop UI. Background hosting, browser integration, timeline, retrospective, orchestration, and isolated parallel work remain follow-on work.
+This document is the architecture entry point required by [AGENTS.md](../AGENTS.md). It captures the agreed product direction and the boundaries used by the implemented headless MVP and desktop UI. Timeline is implemented in part (see [Timeline](timeline.md)); Terminal, Browser and Files are implemented as described in [desktop tools](desktop-tools.md). Background hosting, the remaining timeline phases, retrospective, orchestration, and isolated parallel work remain follow-on work.
 
 ## Product and implementation scope
 
@@ -18,7 +18,7 @@ Implementation proceeds one explicitly approved feature at a time. This document
 | --- | --- | --- |
 | Product language | TypeScript for application code, adapters, UI behavior, and project tooling where practical | Selected by user |
 | Desktop platform | Electron | Selected by user |
-| UI library and styling | Framework-free TypeScript renderer with plain CSS, Phosphor icons, bundled Inter and IBM Plex Mono; see [desktop application](desktop.md) | Selected by user 2026-10-12 |
+| UI library and styling | Framework-free TypeScript renderer with plain CSS, Phosphor icons, bundled Inter, IBM Plex Mono and Geist Mono; see [desktop application](desktop.md) | Selected by user 2026-10-12 |
 | Git hooks | Husky | Selected by user; hook policies still to define |
 | Package management and development scripts | npm with Node.js tooling | Selected baseline |
 | Running desktop application | Electron main for lifecycle and IPC validation; application services in a separate Electron utility process (execution host) | Selected by user 2026-10-12; supervision and background mode remain open |
@@ -34,7 +34,7 @@ Use npm for dependency management and project scripts, with Node.js development 
 
 Pin tooling and dependency versions when the scaffold is approved, commit the npm lockfile, and use reproducible installs in CI. Development Node.js and Electron's embedded Node.js may differ; validate production code against the shipped Electron environment.
 
-Before adopting the build setup, verify dependency installation, required package install scripts, native dependencies, and a packaged Electron launch. Passing headless unit tests alone does not establish Electron compatibility. No compatibility experiment has been run yet.
+Before adopting the build setup, verify dependency installation, required package install scripts, native dependencies, and a packaged Electron launch. Passing headless unit tests alone does not establish Electron compatibility. The desktop-tool smoke checks now exercise Chromium views and local/Codex PTYs on the development machine; a packaged distribution launch remains unverified.
 
 ### Husky's role
 
@@ -67,13 +67,13 @@ Proposed ownership:
 | Sessions | Application session identity, conversation history, continuation context, and native session associations | Runtime session IDs are associations, never the global session identity |
 | Execution | Run lifecycle, cancellation, recovery coordination, and execution records | Coordinates accounts, sessions, and runtimes through their public interfaces |
 | Projects | Selected folder identity, session context, execution path, and editing-run ownership | All consumers use one project ID; platform access is supplied through adapters |
-| Timeline | Project history views and feature-specific indexes relating execution and code changes | Consumes core records and Git information without owning session execution |
+| Timeline | Per-session observed repository snapshots, their checkpoint index, and read-only existing project history | Consumes project paths, sessions and project lock state through a narrow port and observes runs through the host; owns its own store and hidden Git refs; never owns session execution |
 | Retrospective | Post-run analysis and environment observations with provenance and validity | Contributes guidance through an explicit optional input; execution works without it |
 | Orchestration | User-defined workflows and stage assignments across models/providers | Calls the same execution services used by a single interactive run |
 
 A project and a workspace are the same product concept: the selected folder and its sessions. The application has one `ProjectRecord`, one `ProjectsService`, and one `projectId` used by sessions, runs, model discovery, and writer locks. The UI consistently calls this entity a project; there is no second folder record or parent/child identity.
 
-The first six rows describe the implemented foundational modules. Connections sits above Accounts and Authentication so the dependency graph stays acyclic: Accounts depends on Authentication's credential types, and Connections depends on both.
+The first six rows describe the implemented foundational modules. Timeline is the first implemented optional feature (phase 1, `src/features/timeline/`). Connections sits above Accounts and Authentication so the dependency graph stays acyclic: Accounts depends on Authentication's credential types, and Connections depends on both.
 
 Connected accounts use the `native_login` credential method: the provider keeps the credential in its own login store scoped to the account's private runtime-context directory (`auth.json` under `CODEX_HOME`, or the macOS Keychain entry keyed to `CLAUDE_CONFIG_DIR`). The app records only the opaque reference, and `NativeLoginCredentialResolver` resolves it to an empty environment because the runtime adapters already point the provider at that directory. Credential material therefore never passes through application code or records. Timeline, retrospective, and orchestration are optional modules maintained and shipped by the product owner, with on/off controls in settings. Third-party installation is not the intended meaning of optional. Specific adapter boundaries may emerge as integrations are validated.
 
@@ -89,6 +89,12 @@ The implemented shared runtime contract uses these operations and values:
 - `RuntimeAdapter.describePermissionMode(mode)` returns adapter-owned text describing the native controls used for an application permission mode, so clients disclose the mapping without provider-name conditionals.
 - `RuntimeAdapter.capabilities(accountId)` returns explicit support flags for resume, fork, approvals, quota reporting, browser tools, computer use, and other optional behavior.
 - The adapter emits normalized application events such as `message_delta`, `thinking_delta`, `tool_request`, `tool_result`, `approval_request`, `usage`, `completed`, `failed`, and `interrupted`.
+
+Interactive questions use a separate provider-neutral `requestQuestions` callback and `question_request`/`question_resolved` events. Execution's `QuestionBroker` owns pending requests, validates answers, journals their lifecycle and settles them on cancellation. The host mirrors pending questions for reconnecting clients and routes `runs.respondToQuestions` to the matching handle. Questions are independent of action permission mode. Claude's `AskUserQuestion` and Codex's `item/tool/requestUserInput` are translated only in runtime adapters; the Codex notification reader stays active while input is pending so native resolution can clear a question. Secret answer values are redacted from normalized question-resolution events while the native callback receives the original value.
+
+Session navigation retains an eight-entry renderer history cache and revalidates saved run versions. Metadata/final messages render before journals finish loading; newer host changes invalidate in-flight loads. JSON documents offer internal read-only projections with detached results, allowing execution/session stores to clone only the requested records rather than the whole database. Persistence schemas and atomic-write behavior are unchanged.
+
+Session removal belongs to Sessions through `SessionStore.remove` and the host command `sessions.remove`. The host serializes removal, attachment imports and run starts for each session, rejects tracked or persisted queued/running runs with `session_busy`, then removes the saved conversation/continuation record and broadcasts `sessions.removed`. Clients evict that session's history cache, discard late metadata/journal/list responses, and clear the chat only when the removed session is selected. Execution audit, attachment retention and Timeline snapshots remain with their existing owners; removal does not purge them or alter project files or provider-owned history. Session/execution schemas are unchanged.
 
 Runtime adapters may also expose a model catalog through the application-owned
 `RuntimeModel` contract. The desktop host composes those entries into one
@@ -106,6 +112,14 @@ runtime switch or a free-form model input.
 The unified model dropdown (updated 2026-10-14) has no search field or modal
 backdrop. It opens above the composer and replaces the model list with the
 selected model's discrete reasoning slider and a compact Fast on/off tag.
+As of 2026-10-15, Settings > Models owns starring from the full discovered
+catalog. `model-favorites.ts` stores per-device routing keys in localStorage;
+the renderer store shares those preferences between Settings and the composer.
+Only currently available starred entries appear in the composer. Empty or
+unavailable favorites never fall back to an unstarred model, and unavailable
+keys survive catalog/account changes. Run submission rechecks membership
+against current preferences before sending. This is renderer selection policy;
+host discovery, provider routing and permission enforcement are unchanged.
 `components/model-picker.ts` owns this presentation and per-device effort/Fast
 preferences; `model-settings.ts` validates them against each catalog entry.
 The shared popover repositions when the list transforms into the smaller
@@ -148,6 +162,25 @@ The product requires users to bring their own provider subscriptions and require
 Subscription authentication has documented technical support for both initial runtimes. The Codex app-server documentation describes ChatGPT-managed login and device-code login. Claude documents subscription OAuth tokens for SDK environments, separate account contexts through `CLAUDE_CONFIG_DIR`, account inspection, and subscription rate-limit events. The Agent SDK is intended to embed Claude Code's agent loop in an application, and the product decision is to proceed with that wrapper model using users' own subscriptions. This does not change the requirement to keep credentials and native session state isolated per account. See [runtime integration notes](runtime-integration-notes.md) for the concrete authentication path and isolation behavior.
 
 ## Dependency direction and composition
+
+Terminal, Browser and Files (completed 2026-10-15) are explicitly assembled
+features under `src/features/`. Files consumes a project lookup and a file
+I/O port; its adapter bounds reads and implements version-checked atomic
+saves. Terminal owns context-scoped shells and bounded output; native runtime
+controls use a core-owned optional port, with `node-pty` as the local fallback.
+Both run in the host. Browser consumes a session lookup and driver port;
+Electron main owns isolated session-scoped views and the renderer owns their
+chrome. Browser commands and session removal share a session mutation lane.
+Core modules do not import these features.
+
+Composition contributes Browser through Execution's optional `AppTool`
+factory. Adapters configure authenticated run-scoped MCP for fresh/resumed
+sessions. Execution owns read-only enforcement and Ask approvals; automatic
+modes preserve native review without a Claude allow-list bypass. Cancellation
+releases pending approvals before awaiting runtime shutdown, and adapters
+close tool listeners on abort/settlement. Native provider shell/file tools
+retain their ownership. See [desktop tools](desktop-tools.md) for limits,
+retention and validation.
 
 Session attachments (added 2026-10-14) follow the same boundaries. Sessions
 owns a provider-neutral `AttachmentStore` port and validates session existence,
@@ -260,13 +293,13 @@ The application wraps the existing runtimes and should reuse their available exe
 
 The initial documentation findings are recorded in [runtime integration notes](runtime-integration-notes.md). Account isolation and supported authentication are represented in the implemented adapters; browser reuse, complete cross-runtime context handoff, and distribution-specific authentication still need targeted verification before those features are exposed. The product requirements do not establish that upstream APIs already provide those deferred behaviors.
 
-### Browser ownership under discussion
+### Browser ownership
 
 The user wants an app browser for manual browsing and agent access, and would prefer to reuse or manually open a provider browser if a supported integration permits it. Search/fetch tools, controllable browser tabs, and full desktop computer use are separate capabilities.
 
-Proposed boundary: an app-level browser service owns tab and profile references and exposes a controlled tool interface to runtime adapters. Both the user and agent can access the same explicitly selected browser context. A provider browser can be another implementation if its API supports opening, observing, and controlling that context. The fallback proposal is an app-owned browser exposed through supported tools such as MCP; no provider-browser embedding capability has been verified yet.
+Implemented 2026-10-15: an app-level browser service exposes a controlled tool interface to runtime adapters. Electron main owns one sandboxed page and in-memory profile per conversation; user controls and authenticated run-scoped MCP tools access that same page. There is no verified provider-browser embedding API in the installed integrations, so the application-owned driver supplies this capability. A future provider driver can implement the same public port if an API supports opening, observing and controlling its browser.
 
-Browser lifetime must account for background mode: closing the control panel must not implicitly destroy a browser still required by an active run. Browser context ownership, human takeover, login/profile scope, rendering technology, and remote placement remain discussion items. Website content must be isolated from the privileged desktop application bridge.
+Pages survive hiding the panel, conversation switches and renderer reloads. Pause/Resume is user-owned and applies to all agent actions. Closing the page, removing the conversation and app exit release it; the current stop-on-exit policy also stops runs. Remote placement, durable browser profiles and future background hosting remain open. Website content is isolated from the privileged bridge. See [desktop tools](desktop-tools.md).
 
 ### App-owned permission modes
 
@@ -345,7 +378,7 @@ The following questions affect multiple modules. They are discussion items, not 
 | 5 | Project concurrency | Same project folder for sequential handoffs; one app-managed writer per project folder; future isolated execution directories for independent parallel work. Decide how to include uncommitted changes, detect external edits, and isolate projects without Git. | Future orchestration, code attribution, and timeline accuracy depend on this boundary. |
 | 6 | Durable storage ownership | Execution host owns application state and an append-only journal; outcome and state updates should be atomic where possible. Select a storage engine, artifact format, migrations, retention, backup, and recovery handling for unknown external outcomes. | The chosen store must make confirmed progress trustworthy without claiming arbitrary tool actions can be rolled back atomically. |
 | 7 | Optional feature lifecycle | Scope clarified: bundled first-party modules toggled in settings. Define per-feature behavior when disabling during active work. | Stopping an optional worker must not abandon core runs or delete their history. |
-| 8 | Presentation, browsers, and distribution | Terminal mode is intended as this harness's presentation. Browser sharing and ownership need agreement. Identify initial operating systems and how runtime executables are supplied and updated. | Determines whether interfaces retain core guarantees and whether integrations work in the packaged application. |
+| 8 | Presentation, browsers, and distribution | Interactive Terminal, shared Browser and Files surfaces are implemented (see desktop tools). Separate CLI presentation, remote browsers, initial operating systems and runtime distribution/update policies remain open. | Determines whether interfaces retain core guarantees and whether integrations work in the packaged application. |
 
 Detailed retrospective policies, orchestration editing, timeline presentation, and model-selection UX can wait for their feature discussions. Exact UI, storage, build, and testing libraries should be selected when the corresponding foundation work is approved; those library choices should not substitute for the ownership decisions above.
 
@@ -368,3 +401,19 @@ Updated 2026-10-14. Projects exposes `getChanges(projectId)` through the desktop
 The Changes surface polls at two-second intervals while visible, serializes reads and rejects replies for a different selected project. It shows current working-tree changes, including edits made before or outside a run; it does not claim agent attribution or persist a diff artifact. Non-Git diffs, filesystem watchers, per-run baselines and large artifact storage remain unimplemented. Response footers contain only timestamps; diagnostic run details move to a separate right-panel surface.
 
 Native permission parameter verification (2026-10-14): Codex CLI 0.162.1 generated protocol bindings expose `approvalsReviewer` on thread start/resume and turn start, with `auto_review` supported. An isolated ephemeral thread-start check returned the requested reviewer and sandbox; no model turn was started. Claude Agent SDK’s installed declarations support `auto`. Provider availability and managed restrictions still govern whether automatic review can execute an action. See [Codex app-server permission parameters](https://developers.openai.com/codex/app-server/) and [Claude SDK permission modes](https://code.claude.com/docs/en/agent-sdk/permissions).
+
+## Optional features: Timeline
+
+Added 2026-10-14. Timeline is the first optional feature module and establishes the pattern for later ones. See [Timeline](timeline.md) for behavior, contracts, and limitations.
+
+- **Location and interface.** `src/features/timeline/` holds the rules and ports; `index.ts` is its public interface. Git, filesystem-watch, and JSON-storage implementations live in `src/adapters/timeline/` and `src/adapters/storage/json-timeline-store.ts`.
+- **Container project resolution (2026-10-15).** The Git snapshot adapter resolves a project inside Git directly, or a non-Git container through the bounded `GitRepositoryDiscovery` adapter shared with Changes. Only a complete, unambiguous single-repository discovery is accepted; its canonical root is checked inside the selected container. History, snapshots, visibility checks and watcher setup use that same resolved root. Project/session identities and pause settings stay unchanged. Ambiguous or incomplete discovery asks the user to open a repository folder; symlinked child directories are not traversed.
+- **Dependencies.** The feature depends on core only through `TimelineCoreAccess` (project path without a selected session, session project path, Codex import provenance, project writer-lock state), which composition builds from public `SessionsService`/`ProjectsService` calls. No core module imports Timeline. The feature owns `timeline.json` and the hidden `refs/rack-timeline/<session ID>` refs; it never writes session, execution, or project records.
+- **Existing history.** `projectHistory` reads bounded first-parent HEAD history and all Rack/Codex/Relay timeline refs independently of session recording. `projectFileDiff` accepts only a currently reachable commit and visible changed path from that project's history. Ordinary root commits compare against an empty tree; snapshot baselines stay hidden. Immutable commit comparisons use a bounded cache, while current ignore rules are evaluated per query. These reads do not persist a session index or alter opt-in.
+- **Automatic project observation (2026-10-15).** The desktop host explicitly starts/stops `ProjectTimelineTracker` through Timeline. It discovers saved projects through the narrow `TimelineCoreAccess.projects` read, coalesces observations per repository root, watches edits outside runs and uses a five-second fallback when watching is unavailable. Newly registered projects request reconciliation. Initial changes compare against HEAD when no project chain exists; observations own `refs/rack-project-timeline/<project ID>`. Project Pause/Resume persists in an additive schema-1 `timeline.json.projects` field; missing settings default on. Session capture remains independently opt-in. Shutdown stops observers alongside run cancellation, and headless readers never start workers implicitly.
+- **Historical viewer (2026-10-15).** Timeline owns `snapshot`, `snapshotFile` and `snapshotHistory`: a visible before/after file union, exact lazy blob reads, scoped diffs and validated same-project navigation targets. The Git adapter lists immutable trees and reads regular blobs by object ID; it never checks out files or follows symbolic links. Contents are bounded at 1 MiB. Electron main validates `openTimelineWindow` through the host and opens only the bundled sandboxed page with app identities in its query. Renderer bootstrap mounts `features/snapshot-window.ts` instead of chat. The window owns its change dropdown, file tree/filter and **Diff**, **Before / After** (split), and **Full context** dropdown independently. Snapshot/file generations discard stale loads during navigation; refreshing the history list does not move the selected comparison. `snapshot-context.ts` reconstructs context only from complete patches. No core records change.
+- **Composition.** `createApplication` assembles Timeline by default and omits it with `timeline: false`. `HostApplication.timeline` is optional. Without it, `timeline.*` commands answer `feature_unavailable` and runs are unaffected.
+- **Run observation.** Execution is unchanged. The host coordinates the cross-module workflow: `runs.start` asks Timeline for a run observer *before* `execution.start`, so the run-start snapshot precedes runtime edits. `ActiveRuns` feeds each normalized event to the observer and finishes it after `run.finished`. Observer calls are guarded, so Timeline can never delay, reorder, or fail a run, and a Timeline failure never blocks one.
+- **Toggle ownership (open).** Settings controls surface visibility. Project observation uses host-owned per-project Pause/Resume, while session run chains use their own opt-in. Hiding the surface does not stop either. A global host-owned plugin toggle remains separate work.
+
+The Timeline renderer exposes Projects' existing bounded repository discovery when a container folder is unsupported. Folder choices reuse or register normal project identities and host tracking through `registerProject`, then change only Timeline's in-memory query target. The selected chat project/session, messages and composer draft stay in place. A repository context label and Back to project action identify that local view; actual chat project changes reset it. This avoids clearing the chat when browsing a nested repository. Discovery replies are generation-guarded. The historical viewer adds a visible change selector, position counter and bounded newer/older buttons over the existing validated `snapshotHistory` targets; no host contract changes are required.

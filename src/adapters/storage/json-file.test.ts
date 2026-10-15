@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { DirectoryRuntimeContextResolver } from "../authentication/directory-runtime-context-resolver.js";
 import { JsonAccountStore } from "./json-account-store.js";
+import { JsonFileDocument } from "./json-file.js";
 
 test("persists account metadata atomically without credential material", async () => {
   const directory = await mkdtemp(join(tmpdir(), "thinking-and-code-"));
@@ -46,4 +47,19 @@ test("creates a private runtime directory for each context", async () => {
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("projected JSON reads detach only the selected data and reflect subsequent writes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rack-projected-json-"));
+  try {
+    const document = new JsonFileDocument(join(directory, "data.json"), {
+      items: [{ id: "chosen", nested: { text: "original" } }, { id: "other", nested: { text: "unrelated" } }],
+    });
+    const selected = await document.select((value) => value.items.find((item) => item.id === "chosen"));
+    selected!.nested.text = "client mutation";
+    assert.equal((await document.select((value) => value.items[0]))?.nested.text, "original");
+    await document.update((value) => ({ items: value.items.map((item) => item.id === "chosen" ? { ...item, nested: { text: "updated" } } : item) }));
+    assert.equal((await document.select((value) => value.items[0]))?.nested.text, "updated");
+    assert.equal((await document.read()).items[1]?.nested.text, "unrelated");
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

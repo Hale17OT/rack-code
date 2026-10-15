@@ -6,8 +6,9 @@
  *   "Show full message" toggle;
  * - the reply is plain text in the page (no bubble), rendered as Markdown.
  *   Live and persisted event folds show streamed text, readable thinking
- *   panels, and consecutive command/file activity in collapsible groups.
- *   Each call retains its own details inside the group. Completed turns keep
+ *   panels, and consecutive activity (tool calls, outputs, and thinking
+ *   between them) compacted into one collapsible group. Each call and trace
+ *   keeps its own details inside the group. Completed turns keep
  *   their activity after reload; the saved assistant message is a fallback;
  * - pending approvals are not part of the transcript. The composer renders
  *   them in an overlay above the prompt (see `composer.ts`);
@@ -38,7 +39,7 @@ import { foldEvents, type TranscriptItem, type TranscriptState } from "../transc
 import { accountLabel, isActiveStatus } from "./run-format.js";
 import { importedTool, presentTool } from "./tool-presentation.js";
 import { formatAttachmentSize } from "./attachments.js";
-import { groupConsecutiveTools, type ToolItem } from "./tool-groups.js";
+import { compacts, groupConsecutiveActivity, type ActivityItem } from "./tool-groups.js";
 
 /** Prompts longer than this (characters or lines) start clipped. */
 const LONG_PROMPT_CHARS = 600;
@@ -161,26 +162,42 @@ function renderTranscript(
   ];
 }
 
-/** Imported tools use the same grouped disclosures while preserving each message's identity. */
+/**
+ * Imported history uses the same compaction as live turns: consecutive tool
+ * and thinking messages form one group, while each message keeps its own
+ * identity (and disclosure key) inside it.
+ */
 function renderImportedHistory(messages: readonly SessionMessageView[], memory: ViewMemory, rerender: () => void, actions: MarkdownActions): Node[] {
   const nodes: Node[] = [];
-  let tools: { key: string; item: ToolItem }[] = [];
+  let activity: { key: string; item: ActivityItem }[] = [];
   const flush = () => {
-    if (tools.length === 0) return;
-    nodes.push(h("article", { class: "turn imported-turn", data: { importedMessageId: tools[0]!.key } },
-      renderToolGroup(`import:${tools[0]!.key}`, tools, memory, actions, false)));
-    tools = [];
+    if (activity.length === 0) return;
+    if (compacts(activity.map((entry) => entry.item))) {
+      nodes.push(h("article", { class: "turn imported-turn", data: { importedMessageId: activity[0]!.key } },
+        renderActivityGroup(`import:${activity[0]!.key}`, activity, memory, actions, false)));
+    } else {
+      for (const entry of activity) {
+        nodes.push(h("article", { class: "turn imported-turn", data: { importedMessageId: entry.key } },
+          renderActivityEntry(entry, memory, actions, false)));
+      }
+    }
+    activity = [];
   };
   for (const message of messages) {
-    if (message.role !== "user" && message.role !== "assistant" && message.metadata?.["presentation"] !== "thinking") {
-      tools.push({ key: message.id, item: importedTool(message.content) });
+    if (message.metadata?.["presentation"] === "thinking") {
+      activity.push({ key: message.id, item: {
+        kind: "thinking", text: message.content, format: message.metadata["thinkingFormat"] === "summary" ? "summary" : "trace",
+      } });
+      continue;
+    }
+    if (message.role !== "user" && message.role !== "assistant") {
+      activity.push({ key: message.id, item: importedTool(message.content) });
       continue;
     }
     flush();
     nodes.push(h("article", { class: "turn imported-turn", data: { importedMessageId: message.id } },
       message.role === "user" ? renderPrompt({ id: message.id, prompt: message.content }, memory, rerender)
-        : message.role === "assistant" ? h("div", { class: "reply md" }, renderMarkdown(message.content, actions))
-          : thinkingLine(message.id, memory, message.content, message.metadata?.["thinkingFormat"] === "summary" ? "summary" : "trace", actions)));
+        : h("div", { class: "reply md" }, renderMarkdown(message.content, actions))));
   }
   flush();
   return nodes;
@@ -204,11 +221,13 @@ function renderTurn(
   const events = live?.events ?? state.transcripts[run.id];
   const folded = events === undefined ? undefined : fold(events);
   if (folded !== undefined) {
-    for (const group of groupConsecutiveTools(folded.items)) {
+    for (const group of groupConsecutiveActivity(folded.items)) {
       const active = live !== undefined && isActiveStatus(run.status);
+      // Group keys keep the earlier `tools:` prefix so open/closed choices
+      // made before this change still apply to the same disclosures.
       reply.push(group.kind === "item"
         ? renderItem(group.item, `${run.id}:${group.index}`, memory, actions, active)
-        : renderToolGroup(`${run.id}:tools:${group.index}`, group.items.map((item, offset) => ({ key: `${run.id}:${group.index + offset}`, item })), memory, actions, active));
+        : renderActivityGroup(`${run.id}:tools:${group.index}`, group.items.map((item, offset) => ({ key: `${run.id}:${group.index + offset}`, item })), memory, actions, active));
     }
     copyText = folded.items.flatMap((item) => item.kind === "text" ? [item.text] : []).join("\n\n");
     if (folded.failure !== undefined) reply.push(errorLine(folded.failure.error));
@@ -295,22 +314,32 @@ function renderItem(
   }
 }
 
-/** A growing contiguous tool sequence keeps one stable group key through streaming redraws. */
-function renderToolGroup(key: string, entries: readonly { key: string; item: ToolItem }[], memory: ViewMemory, actions: MarkdownActions, active: boolean): HTMLElement {
-  const tools = entries.map(({ item }) => item.kind === "tool" ? item : {
-    kind: "tool" as const, tool: "Tool output", input: undefined, output: item.output, hasOutput: true, finished: true,
-  });
-  if (entries.length === 1) return activityLine(entries[0]!.key, memory, tools[0]!, active, actions.openPath);
+/**
+ * One compacted run of consecutive activity: tool calls, orphan outputs, and
+ * the thinking between them, in their original order. The group starts
+ * collapsed; its summary counts tool calls and thoughts and aggregates tool
+ * status. While the run is active and the newest item is thinking, the
+ * status reads "Thinking". A growing sequence keeps one stable key through
+ * streaming redraws, and each entry keeps its own disclosure key inside.
+ */
+function renderActivityGroup(key: string, entries: readonly { key: string; item: ActivityItem }[], memory: ViewMemory, actions: MarkdownActions, active: boolean): HTMLElement {
+  const tools = entries.flatMap(({ item }) => item.kind === "thinking" ? [] : [asTool(item)]);
+  const thoughts = entries.length - tools.length;
   const views = tools.map((item) => presentTool(item, active));
   const failed = views.filter((view) => view.status === "Failed").length;
   const running = views.filter((view) => view.status === "Running").length;
-  const status = running > 0 ? `${running} running` : failed > 0 ? `${failed} failed`
+  const thinking = active && running === 0 && entries.at(-1)?.item.kind === "thinking";
+  const status = running > 0 ? `${running} running` : thinking ? "Thinking" : failed > 0 ? `${failed} failed`
     : views.some((view) => view.status === "Stopped") ? "Stopped" : views.every((view) => view.status === "Completed") ? "Completed" : "Recorded";
+  const title = [
+    `${tools.length} tool ${tools.length === 1 ? "call" : "calls"}`,
+    thoughts === 0 ? null : `${thoughts} ${thoughts === 1 ? "thought" : "thoughts"}`,
+  ].filter((part) => part !== null).join(" · ");
   const details = h("details", { class: `tool-group${failed > 0 ? " has-failures" : ""}`, open: memory.openToolGroups.has(key), data: { toolGroup: key } },
-    h("summary", {}, icon("stack"), h("span", { class: "tool-group-title" }, `${entries.length} tool calls`),
-      h("span", { class: "tool-group-status" }, running > 0 ? icon("circle-notch", { className: "spin" }) : null, status),
+    h("summary", {}, icon("stack"), h("span", { class: "tool-group-title" }, title),
+      h("span", { class: "tool-group-status" }, running > 0 || thinking ? icon("circle-notch", { className: "spin" }) : null, status),
       icon("caret-right", { className: "activity-caret" })),
-    h("div", { class: "tool-group-body" }, ...tools.map((item, index) => activityLine(entries[index]!.key, memory, item, active, actions.openPath))),
+    h("div", { class: "tool-group-body" }, ...entries.map((entry) => renderActivityEntry(entry, memory, actions, active))),
   );
   details.addEventListener("toggle", () => {
     // Detached disclosures can still deliver queued toggle events after a redraw.
@@ -318,6 +347,21 @@ function renderToolGroup(key: string, entries: readonly { key: string; item: Too
     if (details.open) memory.openToolGroups.add(key); else memory.openToolGroups.delete(key);
   });
   return details;
+}
+
+/** One activity entry, standalone or inside a group. */
+function renderActivityEntry(entry: { key: string; item: ActivityItem }, memory: ViewMemory, actions: MarkdownActions, active: boolean): HTMLElement {
+  const { key, item } = entry;
+  return item.kind === "thinking"
+    ? thinkingLine(key, memory, item.text, item.format, actions)
+    : activityLine(key, memory, asTool(item), active, actions.openPath);
+}
+
+/** Orphan outputs render as a finished "Tool output" call. */
+function asTool(item: Exclude<ActivityItem, { kind: "thinking" }>): Extract<TranscriptItem, { kind: "tool" }> {
+  return item.kind === "tool" ? item : {
+    kind: "tool", tool: "Tool output", input: undefined, output: item.output, hasOutput: true, finished: true,
+  };
 }
 
 /** Activity starts as a compact status row; details appear only on user expansion. */

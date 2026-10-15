@@ -46,7 +46,7 @@ export class JsonSessionStore implements SessionStore {
   }
 
   async get(sessionId: SessionId): Promise<SessionRecord | undefined> {
-    return (await this.document.read()).sessions.find((session) => session.id === sessionId);
+    return this.document.select((value) => value.sessions.find((session) => session.id === sessionId));
   }
 
   async save(session: SessionRecord): Promise<void> {
@@ -56,6 +56,13 @@ export class JsonSessionStore implements SessionStore {
         ...current.sessions.filter((candidate) => candidate.id !== session.id),
         session,
       ],
+    }));
+  }
+
+  async remove(sessionId: SessionId): Promise<void> {
+    await this.document.update((current) => ({
+      ...current,
+      sessions: current.sessions.filter((session) => session.id !== sessionId),
     }));
   }
 }

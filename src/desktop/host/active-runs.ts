@@ -16,11 +16,17 @@
  *
  * Nothing here changes run state directly; ExecutionService remains the only
  * writer of run, attempt, and journal records.
+ *
+ * Optional observers (currently Timeline capture) receive each event after it
+ * is recorded here and are finished after `run.finished` is emitted. They
+ * can never delay, reorder, or fail the drain: their calls are guarded and
+ * `finish` is awaited only so stop-on-exit waits for the final capture.
  */
 import type { ExecutionHandle } from "../../core/execution/service.js";
-import type { ApprovalRequest, RuntimeEvent } from "../../core/execution/types.js";
+import type { ApprovalRequest, RuntimeEvent, UserQuestionRequest, UserQuestionResponse } from "../../core/execution/types.js";
 import type { HostEvent } from "../../contracts/desktop/events.js";
 import type { ActiveRunView, RunView } from "../../contracts/desktop/views.js";
+import type { TimelineRunObserver } from "../../features/timeline/index.js";
 import { HostOperationError } from "./errors.js";
 
 interface ActiveRun {
@@ -29,9 +35,12 @@ interface ActiveRun {
   run: RunView;
   readonly events: RuntimeEvent[];
   readonly pendingApprovals: Map<string, ApprovalRequest>;
+  readonly pendingQuestions: Map<string, UserQuestionRequest>;
   cancelRequested: boolean;
   readonly fallbackFromAccountId?: string;
-  /** Settles after `run.finished` has been emitted. */
+  /** Optional per-run observer supplied by an assembled feature. */
+  readonly observer?: TimelineRunObserver;
+  /** Settles after `run.finished` has been emitted and the observer finished. */
   done: Promise<void>;
 }
 
@@ -52,15 +61,17 @@ export class ActiveRuns {
    * returned promise is not awaited by callers: the run outlives the request
    * that started it.
    */
-  track(handle: ExecutionHandle, run: RunView, fallbackFromAccountId?: string): void {
+  track(handle: ExecutionHandle, run: RunView, fallbackFromAccountId?: string, observer?: TimelineRunObserver): void {
     const active: ActiveRun = {
       handle,
       sessionId: run.sessionId,
       run,
       events: [],
       pendingApprovals: new Map(),
+      pendingQuestions: new Map(),
       cancelRequested: false,
       ...(fallbackFromAccountId === undefined ? {} : { fallbackFromAccountId }),
+      ...(observer === undefined ? {} : { observer }),
       done: Promise.resolve(),
     };
     // Register before draining so a fast run cannot finish (and delete
@@ -75,6 +86,7 @@ export class ActiveRuns {
       run: active.run,
       events: [...active.events],
       pendingApprovals: [...active.pendingApprovals.values()],
+      pendingQuestions: [...active.pendingQuestions.values()],
       cancelRequested: active.cancelRequested,
       ...(active.fallbackFromAccountId === undefined
         ? {}
@@ -103,6 +115,15 @@ export class ActiveRuns {
     if (approval !== undefined) {
       this.dependencies.emit({ type: "run.approval_resolved", runId, approval, decision });
     }
+  }
+
+  /** The core broker validates question IDs and choices before resolving the
+   * native callback. All connected clients observe the resolution event.
+   */
+  async respondToQuestions(runId: string, requestId: string, response: UserQuestionResponse | null): Promise<void> {
+    const active = this.require(runId);
+    if (active.handle.respondToQuestions === undefined) throw new HostOperationError("invalid_input", "Question input is unavailable for this run.");
+    await active.handle.respondToQuestions(requestId, response);
   }
 
   /**
@@ -156,7 +177,12 @@ export class ActiveRuns {
         if (event.type === "approval_request") {
           active.pendingApprovals.set(event.request.id, event.request);
         }
+        if (event.type === "question_request") active.pendingQuestions.set(event.request.id, event.request);
+        if (event.type === "question_resolved") active.pendingQuestions.delete(event.requestId);
         emit({ type: "run.event", runId, index, event });
+        if (active.observer !== undefined) {
+          try { active.observer.observe(event); } catch { /* Optional observers never affect the run. */ }
+        }
         if (index === 0) {
           // By the first event the service has taken the project writer
           // lock and marked the run running; refresh both for clients.
@@ -187,6 +213,9 @@ export class ActiveRuns {
     emit({ type: "accounts.changed" });
     emit({ type: "projects.changed" });
     emit({ type: "sessions.changed", projectId: active.run.projectId, sessionId: active.sessionId });
+    // Final observation ("Run settled") after the run is reported finished,
+    // including failed and cancelled runs. Awaited so shutdown waits for it.
+    await active.observer?.finish().catch(() => undefined);
   }
 
   private async refresh(active: ActiveRun): Promise<void> {

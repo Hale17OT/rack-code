@@ -22,12 +22,28 @@ import {
   type SessionDiscovery,
   type ExternalSessionSnapshot,
   type AttachmentKind,
+  type SessionView,
+  type ProjectView,
+  type RuntimeEvent,
+  type UserQuestionResponse,
 } from "../../contracts/desktop/index.js";
 import type { HostClient } from "./host-client.js";
 import { loadEnabledPlugins, saveEnabledPlugins } from "./surfaces.js";
 import type { AppState, LiveRun, Notice, SettingsSection, Store } from "./store.js";
 import { eventsFromJournal } from "./transcript.js";
 import { MAX_ATTACHMENTS, type SessionAttachment } from "../../core/sessions/attachments.js";
+import { loadModelFavorites, saveModelFavorites } from "./model-favorites.js";
+import { modelKey } from "./components/model-settings.js";
+import type { BrowserPresentation, BrowserRequest } from "../../features/browser/index.js";
+
+interface CachedSession {
+  readonly session: SessionView;
+  readonly runs: readonly RunView[];
+  readonly transcripts: AppState["transcripts"];
+}
+
+/** Bound retained history while making back-and-forth navigation immediate. */
+const SESSION_CACHE_LIMIT = 8;
 
 export class Controller {
   private ready = false;
@@ -35,6 +51,12 @@ export class Controller {
   private readonly ownConnects = new Set<string>();
   private readonly bufferedEvents: HostEvent[] = [];
   private readonly reloads = new Map<string, Promise<void>>();
+  private readonly sessionCache = new Map<string, CachedSession>();
+  private readonly sessionRevisions = new Map<string, number>();
+  /** Reject late metadata/list responses for sessions removed by any client. */
+  private readonly removedSessions = new Set<string>();
+  /** Timeline panel subscribers; Timeline data is panel-owned, not stored globally. */
+  private readonly timelineListeners = new Set<(sessionId: string) => void>();
 
   constructor(
     private readonly host: HostClient,
@@ -46,9 +68,64 @@ export class Controller {
     return this.host.call("projects.changes", { projectId, ...(repositoryPath === undefined ? {} : { repositoryPath }) });
   }
 
+  listFiles(projectId: string, path: string) { return this.host.call("files.list", { projectId, path }); }
+  readFile(projectId: string, path: string) { return this.host.call("files.read", { projectId, path }); }
+  saveFile(projectId: string, path: string, text: string, version: string) { return this.host.call("files.save", { projectId, path, text, version }); }
+  openTerminal(projectId: string, sessionId: string | undefined, cols: number, rows: number) {
+    return this.host.call("terminal.open", { projectId, ...(sessionId === undefined ? {} : { sessionId }), cols, rows });
+  }
+  readTerminal(terminalId: string, after: number) { return this.host.call("terminal.read", { terminalId, after }); }
+  writeTerminal(terminalId: string, data: string) { return this.host.call("terminal.write", { terminalId, data }); }
+  resizeTerminal(terminalId: string, cols: number, rows: number) { return this.host.call("terminal.resize", { terminalId, cols, rows }); }
+  closeTerminal(terminalId: string) { return this.host.call("terminal.close", { terminalId }); }
+  controlBrowser(sessionId: string, request: BrowserRequest) { return this.host.call("browser.control", { sessionId, request }); }
+  presentBrowser(request: BrowserPresentation) { return this.host.presentBrowser(request); }
+
   /** Discovery is cached by the host; explicit rescan bypasses that cache. */
   discoverProjectRepositories(projectId: string, options: import("../../contracts/desktop/views.js").RepositoryDiscoveryOptions = {}) {
     return this.host.call("projects.repositories", { projectId, ...options });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Timeline (optional feature). The panel owns loading and error display, as
+  // the Changes panel does, so these return host results or throw.
+
+  timelineStatus(sessionId: string) {
+    return this.host.call("timeline.status", { sessionId });
+  }
+
+  setTimelineEnabled(sessionId: string, enabled: boolean) {
+    return this.host.call("timeline.setEnabled", { sessionId, enabled });
+  }
+
+  timelineCheckpoints(sessionId: string) {
+    return this.host.call("timeline.checkpoints", { sessionId });
+  }
+
+  timelineProjectHistory(projectId: string) {
+    return this.host.call("timeline.projectHistory", { projectId });
+  }
+
+  setProjectTimelineEnabled(projectId: string, enabled: boolean) {
+    return this.host.call("timeline.setProjectEnabled", { projectId, enabled });
+  }
+
+  openTimelineWindow(request: import("../../contracts/desktop/index.js").TimelineWindowRequest) {
+    return this.host.openTimelineWindow(request);
+  }
+
+  timelineProjectFileDiff(projectId: string, checkpointId: string, path: string) {
+    return this.host.call("timeline.projectFileDiff", { projectId, checkpointId, path });
+  }
+
+  timelineFileDiff(sessionId: string, checkpointId: string, path: string) {
+    return this.host.call("timeline.fileDiff", { sessionId, checkpointId, path });
+  }
+
+  /** Called with a session ID whenever the host reports Timeline changes for it. */
+  onTimelineChanged(listener: (sessionId: string) => void): () => void {
+    this.timelineListeners.add(listener);
+    return () => this.timelineListeners.delete(listener);
   }
 
   async start(): Promise<void> {
@@ -106,6 +183,7 @@ export class Controller {
   /** Makes one project current without opening a session. */
   async selectProject(projectId: string): Promise<void> {
     if (this.store.get().selection.projectId === projectId) return;
+    this.rememberCurrentSession();
     this.store.update((state) => ({
       ...state,
       selection: { projectId, sessionId: undefined, runId: undefined },
@@ -119,16 +197,23 @@ export class Controller {
 
   /** Opens a session; its project becomes the current project. */
   async selectSession(sessionId: string): Promise<void> {
+    if (this.removedSessions.has(sessionId)) return;
+    this.rememberCurrentSession();
+    const cached = this.sessionCache.get(sessionId);
     const projectId = this.store.get().sessions.find((session) => session.id === sessionId)?.projectId;
     const projectChanged = projectId !== undefined && projectId !== this.store.get().selection.projectId;
     this.store.update((state) => ({
       ...state,
       selection: { projectId: projectId ?? state.selection.projectId, sessionId, runId: undefined },
+      session: cached?.session,
+      runs: cached?.runs ?? [],
+      transcripts: cached?.transcripts ?? {},
+      journal: undefined,
     }));
     await Promise.all([
       this.reloadSession(sessionId),
       projectChanged ? this.reloadProjects() : Promise.resolve(),
-      this.reloadModels(),
+      projectChanged ? this.reloadModels() : Promise.resolve(),
     ]);
   }
 
@@ -151,7 +236,19 @@ export class Controller {
 
   /** Loads per-device renderer preferences; call once before `start`. */
   loadPreferences(): void {
-    this.store.update((state) => ({ ...state, enabledPlugins: loadEnabledPlugins() }));
+    this.store.update((state) => ({ ...state, enabledPlugins: loadEnabledPlugins(), favoriteModelKeys: loadModelFavorites() }));
+  }
+
+  /** Settings owns the choice; catalog refreshes never prune unavailable favorites. */
+  setModelFavorite(key: string, favorite: boolean): void {
+    this.store.update((state) => {
+      if (state.favoriteModelKeys.includes(key) === favorite) return state;
+      if (favorite && !state.models.some((model) => modelKey(model) === key)) return state;
+      const others = state.favoriteModelKeys.filter((candidate) => candidate !== key);
+      const favoriteModelKeys = favorite ? [...others, key] : others;
+      saveModelFavorites(favoriteModelKeys);
+      return { ...state, favoriteModelKeys };
+    });
   }
 
   setPluginEnabled(pluginId: string, enabled: boolean): void {
@@ -175,15 +272,25 @@ export class Controller {
   // Projects and sessions
 
   /**
-   * Creates one project for the folder selected in the native picker.
+   * Creates one project for a chosen folder (native picker or discovered repository).
    * Sessions, model discovery, and runs all use this same project identity.
+   * A caller can guard selection when the user may navigate while creation
+   * is pending; registration still finishes, but does not steal newer focus.
    */
-  async createProject(params: { path: string; startingRevision?: string }): Promise<boolean> {
+  async createProject(params: { path: string; startingRevision?: string }, selectIf: () => boolean = () => true): Promise<boolean> {
+    const project = await this.registerProject(params);
+    if (project === undefined) return false;
+    if (selectIf()) await this.selectProject(project.id);
+    return true;
+  }
+
+  /** Registers a folder for panel-local browsing without navigating the chat. */
+  async registerProject(params: { path: string; startingRevision?: string }): Promise<ProjectView | undefined> {
+    let project: ProjectView | undefined;
     return this.attempt(async () => {
-      const project = await this.host.call("projects.create", params);
+      project = await this.host.call("projects.create", params);
       await this.reloadProjects();
-      await this.selectProject(project.id);
-    });
+    }).then((success) => success ? project : undefined);
   }
 
   /** Creates a session directly from a project row, without a title form. */
@@ -409,6 +516,20 @@ export class Controller {
     await this.attempt(() => this.host.call("runs.respondToApproval", { runId, approvalId, decision }).then(() => undefined));
   }
 
+  async respondToQuestions(runId: string, requestId: string, response: UserQuestionResponse | null): Promise<boolean> {
+    return this.attempt(() => this.host.call("runs.respondToQuestions", { runId, requestId, response }).then(() => undefined));
+  }
+
+  /** Removal events update every window; also apply locally so fake/offline
+   * transports that deliver a command reply first cannot leave stale history.
+   */
+  async removeSession(sessionId: string): Promise<boolean> {
+    return this.attempt(async () => {
+      await this.host.call("sessions.remove", { sessionId });
+      this.forgetSession(sessionId);
+    });
+  }
+
   acknowledgeUnknown(runId: string): void {
     this.store.update((state) => ({ ...state, acknowledgedUnknown: { ...state.acknowledgedUnknown, [runId]: true } }));
   }
@@ -430,6 +551,7 @@ export class Controller {
         }));
         return;
       case "run.started":
+        this.invalidateSession(event.run.sessionId);
         this.addLiveRun(event.run, event.fallbackFromAccountId);
         return;
       case "run.updated":
@@ -449,6 +571,7 @@ export class Controller {
         this.patchLive(event.runId, (live) => ({ ...live, cancelRequested: true }));
         return;
       case "run.finished":
+        this.invalidateSession(event.run.sessionId);
         this.finishRun(event.run);
         return;
       case "auth.updated":
@@ -462,8 +585,16 @@ export class Controller {
         void this.reloadProjects();
         return;
       case "sessions.changed":
+        if (this.removedSessions.has(event.sessionId)) return;
+        this.invalidateSession(event.sessionId);
         void this.reloadSessions();
         if (event.sessionId === selection.sessionId) void this.reloadSession(event.sessionId);
+        return;
+      case "sessions.removed":
+        this.forgetSession(event.sessionId);
+        return;
+      case "timeline.changed":
+        for (const listener of [...this.timelineListeners]) listener(event.sessionId);
         return;
     }
   }
@@ -475,6 +606,7 @@ export class Controller {
         run,
         events: [],
         pendingApprovals: [],
+        pendingQuestions: [],
         decisions: {},
         cancelRequested: false,
         ...(fallbackFromAccountId === undefined ? {} : { fallbackFromAccountId }),
@@ -500,6 +632,8 @@ export class Controller {
       pendingApprovals: event.type === "approval_request"
         ? [...current.pendingApprovals, event.request]
         : current.pendingApprovals,
+      pendingQuestions: event.type === "question_request" ? [...(current.pendingQuestions ?? []), event.request]
+        : event.type === "question_resolved" ? (current.pendingQuestions ?? []).filter((request) => request.id !== event.requestId) : current.pendingQuestions ?? [],
     }));
   }
 
@@ -546,7 +680,7 @@ export class Controller {
   /** Refreshes provider-backed models after account or project changes. */
   private reloadModels(): Promise<void> {
     return this.coalesce("models", async () => {
-      const projectId = this.store.get().session?.projectId;
+      const projectId = this.store.get().selection.projectId;
       const models = await this.host.call("models.list", projectId === undefined ? {} : { projectId });
       this.store.update((state) => ({
         ...state,
@@ -566,31 +700,103 @@ export class Controller {
 
   private reloadSessions(): Promise<void> {
     return this.coalesce("sessions", async () => {
-      const sessions = await this.host.call("sessions.list", {});
+      const listed = await this.host.call("sessions.list", {});
+      const sessions = listed.filter((session) => !this.removedSessions.has(session.id));
       this.store.update((state) => ({ ...state, sessions }));
     });
   }
 
   private reloadSession(sessionId: string): Promise<void> {
+    if (this.removedSessions.has(sessionId)) return Promise.resolve();
     return this.coalesce(`session:${sessionId}`, async () => {
-      const [session, runs] = await Promise.all([
-        this.host.call("sessions.get", { sessionId }),
-        this.host.call("runs.list", { sessionId }),
-      ]);
-      const cache = this.store.get().transcripts;
-      const saved = await Promise.all(runs.map(async (run) => {
-        if (this.store.get().live[run.id] !== undefined) return [run.id, undefined] as const;
-        if (cache[run.id] !== undefined) return [run.id, cache[run.id]!] as const;
-        return [run.id, eventsFromJournal(await this.host.call("runs.journal", { runId: run.id }))] as const;
-      }));
-      this.store.update((state) => state.selection.sessionId === sessionId ? {
-        ...state, session, runs,
-        transcripts: Object.fromEntries(saved.flatMap(([id, events]) => {
-          const current = state.transcripts[id] ?? events;
-          return current === undefined ? [] : [[id, current]];
-        })),
-      } : state);
+      const revision = this.sessionRevisions.get(sessionId) ?? 0;
+      try {
+        const [session, runs] = await Promise.all([
+          this.host.call("sessions.get", { sessionId }),
+          this.host.call("runs.list", { sessionId }),
+        ]);
+        if (this.removedSessions.has(sessionId) || revision !== (this.sessionRevisions.get(sessionId) ?? 0)) return;
+        const cached = this.sessionCache.get(sessionId);
+        const current = this.store.get();
+        const previousRuns = current.session?.id === sessionId ? current.runs : cached?.runs ?? [];
+        const previousEvents = current.session?.id === sessionId ? current.transcripts : cached?.transcripts ?? {};
+        const transcripts: Record<string, readonly RuntimeEvent[]> = {};
+        for (const run of runs) {
+          const previous = previousRuns.find((candidate) => candidate.id === run.id);
+          // Only immutable, settled histories may be reused. A newer persisted
+          // run or a formerly active run must be re-read after settlement.
+          if (previous?.updatedAt === run.updatedAt && previous.status === run.status &&
+            run.status !== "queued" && run.status !== "running" && previousEvents[run.id] !== undefined) {
+            transcripts[run.id] = previousEvents[run.id]!;
+          }
+        }
+        // Publish prompts/final replies as soon as metadata arrives. Activity
+        // restoration runs in the background instead of gating every message.
+        const publish = () => {
+          if (this.removedSessions.has(sessionId) || revision !== (this.sessionRevisions.get(sessionId) ?? 0)) return;
+          this.rememberSession({ session, runs, transcripts: { ...transcripts } });
+          this.store.update((state) => state.selection.sessionId === sessionId ? {
+            ...state, session, runs, transcripts: { ...transcripts },
+          } : state);
+        };
+        publish();
+        const saved = await Promise.allSettled(runs.map(async (run) => {
+          if (this.store.get().live[run.id] !== undefined) return [run.id, undefined] as const;
+          if (transcripts[run.id] !== undefined) return [run.id, transcripts[run.id]!] as const;
+          return [run.id, eventsFromJournal(await this.host.call("runs.journal", { runId: run.id }))] as const;
+        }));
+        let restored = false;
+        for (const result of saved) {
+          if (result.status === "fulfilled" && result.value[1] !== undefined && transcripts[result.value[0]] !== result.value[1]) {
+            transcripts[result.value[0]] = result.value[1];
+            restored = true;
+          }
+        }
+        if (restored) publish();
+        const failure = saved.find((result) => result.status === "rejected");
+        if (failure?.status === "rejected") throw failure.reason;
+      } catch (error) {
+        if (error instanceof HostCommandError && error.code === "session_not_found") this.forgetSession(sessionId);
+        if (!this.removedSessions.has(sessionId)) throw error;
+      } finally {
+        // A live run can finish while old metadata/journals are in flight.
+        // Discard that load and retry after coalescing releases its promise.
+        if (!this.removedSessions.has(sessionId) && revision !== (this.sessionRevisions.get(sessionId) ?? 0)) setTimeout(() => {
+          if (this.store.get().selection.sessionId === sessionId) void this.reloadSession(sessionId);
+        }, 0);
+      }
     });
+  }
+
+  private invalidateSession(sessionId: string): void {
+    this.sessionRevisions.set(sessionId, (this.sessionRevisions.get(sessionId) ?? 0) + 1);
+  }
+
+  private forgetSession(sessionId: string): void {
+    this.removedSessions.add(sessionId);
+    this.invalidateSession(sessionId);
+    this.sessionCache.delete(sessionId);
+    this.store.update((state) => ({
+      ...state,
+      sessions: state.sessions.filter((session) => session.id !== sessionId),
+      ...(state.selection.sessionId !== sessionId ? {} : {
+        selection: { projectId: state.selection.projectId, sessionId: undefined, runId: undefined },
+        session: undefined, runs: [], transcripts: {}, journal: undefined,
+      }),
+    }));
+  }
+
+  private rememberCurrentSession(): void {
+    const state = this.store.get();
+    if (state.session?.id === state.selection.sessionId && state.session !== undefined) {
+      this.rememberSession({ session: state.session, runs: state.runs, transcripts: state.transcripts });
+    }
+  }
+
+  private rememberSession(value: CachedSession): void {
+    this.sessionCache.delete(value.session.id);
+    this.sessionCache.set(value.session.id, value);
+    while (this.sessionCache.size > SESSION_CACHE_LIMIT) this.sessionCache.delete(this.sessionCache.keys().next().value!);
   }
 
   private reloadJournal(runId: string): Promise<void> {
@@ -667,6 +873,10 @@ export function describeError(error: unknown, state: AppState): Notice {
       return { ...base, message: "No account for this provider is marked available. Choose an account explicitly." };
     case "project_busy":
       return { ...base, message: `Project is being edited by attempt ${error.details["attemptId"] ?? "unknown"}. Retry after it finishes.` };
+    case "session_busy":
+      return { ...base, message: "Stop this session's active run before removing it." };
+    case "file_conflict":
+      return { ...base, message: "This file changed on disk. Reload before saving; your draft is kept." };
     case "account_not_found":
     case "project_not_found":
     case "session_not_found":
@@ -684,6 +894,16 @@ export function describeError(error: unknown, state: AppState): Notice {
       return { ...base, message: "That run is no longer active." };
     case "host_unavailable":
       return { ...base, message: state.host.detail ?? "The execution host is not running. Restart the app." };
+    case "feature_unavailable":
+      return { ...base, message: "This feature is not available in this version of the app." };
+    case "timeline_busy":
+      return { ...base, message: "Stop the current run before changing timeline settings." };
+    case "timeline_unsupported":
+      return { ...base, message: "Timeline is not supported for this project." };
+    case "snapshot_not_found":
+      return { ...base, message: "No snapshot for this action. Refresh the timeline." };
+    case "snapshot_path_invalid":
+      return { ...base, message: "File is not part of this snapshot." };
     case "invalid_input":
     case "unknown_command":
     case "internal":
@@ -698,6 +918,7 @@ function liveFromSnapshot(active: readonly ActiveRunView[], previous: AppState["
       run: view.run,
       events: view.events,
       pendingApprovals: view.pendingApprovals,
+      pendingQuestions: view.pendingQuestions ?? [],
       decisions: previous[view.run.id]?.decisions ?? {},
       cancelRequested: view.cancelRequested,
       ...(view.fallbackFromAccountId === undefined ? {} : { fallbackFromAccountId: view.fallbackFromAccountId }),

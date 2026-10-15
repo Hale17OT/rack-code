@@ -34,3 +34,20 @@ test("parameters are validated, optional keys are omitted, and extra keys reject
 test("parameterless commands accept undefined", () => {
   assert.deepEqual(validateCommandParams("accounts.list", undefined), {});
 });
+
+test("session removal accepts only an explicit saved-session identity", () => {
+  assert.deepEqual(validateCommandParams("sessions.remove", { sessionId: "saved" }), { sessionId: "saved" });
+  for (const value of [{}, { sessionId: "" }, { sessionId: 3 }, { sessionId: "saved", path: "/project" }]) {
+    assert.throws(() => validateCommandParams("sessions.remove", value), ContractValidationError);
+  }
+});
+
+test("question answers have a bounded explicit shape and cancellation is distinct from an answer", () => {
+  const base = { runId: "r", requestId: "q" };
+  assert.deepEqual(validateCommandParams("runs.respondToQuestions", { ...base, response: null }), { ...base, response: null });
+  assert.deepEqual(validateCommandParams("runs.respondToQuestions", { ...base, response: { answers: { format: ["Short"] } } }).response,
+    { answers: { format: ["Short"] } });
+  for (const response of [{ answers: { format: [1] } }, { answers: { format: [""] } }, { answers: {}, allow: true }, { answers: [] }]) {
+    assert.throws(() => validateCommandParams("runs.respondToQuestions", { ...base, response }), ContractValidationError);
+  }
+});

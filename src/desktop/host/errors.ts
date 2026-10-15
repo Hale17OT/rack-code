@@ -6,6 +6,8 @@
  * `internal`; its message is still returned because the host and the user
  * are on the same machine and the text helps diagnosis.
  */
+import { QuestionAnswerError } from "../../core/execution/question-types.js";
+import { FileOperationError } from "../../features/files/index.js";
 import {
   AccountNotFoundError,
   AccountProviderMismatchError,
@@ -26,6 +28,12 @@ import {
 } from "../../core/projects/errors.js";
 import { InvalidSessionError, SessionNotFoundError } from "../../core/sessions/errors.js";
 import { ConnectNotFoundError, ConnectorNotFoundError } from "../../core/connections/errors.js";
+import {
+  SnapshotNotFoundError,
+  SnapshotPathError,
+  TimelineBusyError,
+  TimelineUnsupportedError,
+} from "../../features/timeline/index.js";
 import type { HostErrorCode, HostErrorPayload } from "../../contracts/desktop/errors.js";
 import { ContractValidationError } from "../../contracts/desktop/validation.js";
 
@@ -46,6 +54,7 @@ export function toHostError(error: unknown): HostErrorPayload {
     return { code: "internal", name: "Error", message: String(error) };
   }
   const base = { name: error.name, message: error.message };
+  if (error instanceof FileOperationError) return { ...base, code: error.code };
   if (error instanceof HostOperationError) {
     return { ...base, code: error.code, ...(error.details === undefined ? {} : { details: error.details }) };
   }
@@ -69,6 +78,7 @@ export function toHostError(error: unknown): HostErrorPayload {
 function codeFor(error: Error): HostErrorCode {
   if (
     error instanceof ContractValidationError ||
+    error instanceof QuestionAnswerError ||
     error instanceof InvalidAccountError ||
     error instanceof InvalidProjectError ||
     error instanceof InvalidSessionError
@@ -86,5 +96,9 @@ function codeFor(error: Error): HostErrorCode {
   if (error instanceof ApprovalNotFoundError) return "approval_not_found";
   if (error instanceof ConnectorNotFoundError) return "connector_not_found";
   if (error instanceof ConnectNotFoundError) return "connect_not_found";
+  if (error instanceof TimelineBusyError) return "timeline_busy";
+  if (error instanceof TimelineUnsupportedError) return "timeline_unsupported";
+  if (error instanceof SnapshotNotFoundError) return "snapshot_not_found";
+  if (error instanceof SnapshotPathError) return "snapshot_path_invalid";
   return "internal";
 }

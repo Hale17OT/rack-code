@@ -8,7 +8,11 @@
  *   surface's key opens it.
  * - Changes reads the selected project working tree through the controller.
  *   Polls are serialized, bounded by the host adapter, and paused while hidden.
- *   Plugin surfaces remain previews. Stale replies cannot cross projects.
+ *   Stale replies cannot cross projects.
+ * - Timeline (optional plugin) is a persistent panel owned by
+ *   `timeline-panel.ts`; the workbench only attaches it and reports whether
+ *   it is the open surface. Files, Terminal and Browser own persistent
+ *   interactive panels; unfinished plugin surfaces remain previews.
  *
  * The open surface is local presentation state. If its plugin is disabled
  * while open, the panel returns to the launcher.
@@ -19,6 +23,10 @@ import type { Controller } from "../controller.js";
 import { renderRepositoryChanges, type ChangesMemory } from "./changes-view.js";
 import { openPopover } from "../components/popover.js";
 import { renderRunDetails } from "./run-detail.js";
+import { createTimelinePanel } from "./timeline-panel.js";
+import { createFilesPanel } from "./files-panel.js";
+import { createTerminalPanel } from "./terminal-panel.js";
+import { createBrowserPanel } from "./browser-panel.js";
 import { h, replace } from "../dom.js";
 import { icon } from "../icons.js";
 import type { Store } from "../store.js";
@@ -36,8 +44,8 @@ export function mountWorkbench(root: HTMLElement, store: Store, isVisible: () =>
   let error: string | undefined;
   let inFlight = false;
   const changesMemory: ChangesMemory = { selectedFiles: new Map(), collapsedGroups: new Set(), split: false };
-  // The body is rebuilt on every render, so pickers are created once and
-  // re-attached with fresh options; rebuilding them would close an open menu
+  // Changes and run details are rebuilt on render, so pickers are created
+  // once and re-attached with fresh options; rebuilding them would close an open menu
   // whenever a streaming run re-renders the panel. App dropdowns replace
   // native <select> elements here, as everywhere in the renderer.
   const runPicker = createDropdown<string>({
@@ -50,6 +58,11 @@ export function mountWorkbench(root: HTMLElement, store: Store, isVisible: () =>
   });
   const body = h("div", { class: "workbench-body" });
   root.append(body);
+  // Created once so its search field and expansion state survive re-renders.
+  const timelinePanel = createTimelinePanel(store, controller, isVisible);
+  const filesPanel = createFilesPanel(store, controller, isVisible);
+  const terminalPanel = createTerminalPanel(store, controller, isVisible);
+  const browserPanel = createBrowserPanel(store, controller, isVisible);
 
   const available = (): readonly SurfaceDefinition[] => {
     const enabled = new Set(store.get().enabledPlugins);
@@ -68,6 +81,9 @@ export function mountWorkbench(root: HTMLElement, store: Store, isVisible: () =>
 
   function render(): void {
     const focused = root.contains(document.activeElement) ? document.activeElement as HTMLElement : undefined;
+    // Persistent inputs (the Timeline filter) lose focus and caret when the
+    // surface is re-attached; remember them so typing is not interrupted.
+    const caret = focused instanceof HTMLInputElement ? { start: focused.selectionStart, end: focused.selectionEnd } : undefined;
     const focusPath = focused?.dataset["changePath"];
     const focusGroup = focused?.dataset["changeGroup"];
     const focusLabel = focused?.getAttribute("aria-label");
@@ -79,12 +95,31 @@ export function mountWorkbench(root: HTMLElement, store: Store, isVisible: () =>
     }));
     const surfaces = available();
     const surface = surfaces.find((candidate) => candidate.id === openSurface);
+    // Streaming chat updates must not detach persistent editors, xterm's
+    // hidden textarea, or the browser chrome. Reattachment loses focus and
+    // IME composition even if the exact DOM node is inserted again.
+    const persistent = surface?.id === "files" ? filesPanel.element
+      : surface?.id === "terminal" ? terminalPanel.element
+        : surface?.id === "browser" ? browserPanel.element
+          : surface?.id === "timeline" ? timelinePanel.element : undefined;
     if (surface === undefined) {
       openSurface = undefined;
       replace(body, renderLauncher(surfaces, open));
-    } else {
+    } else if (persistent === undefined || !body.contains(persistent)) {
       replace(body, renderSurface(surface, () => open(undefined), surface.id === "changes" ? renderChanges()
-        : surface.id === "run-details" ? renderDetails() : undefined));
+        : surface.id === "run-details" ? renderDetails()
+          : surface.id === "timeline" ? timelinePanel.element
+            : surface.id === "files" ? filesPanel.element
+              : surface.id === "terminal" ? terminalPanel.element
+                : surface.id === "browser" ? browserPanel.element : undefined));
+    }
+    timelinePanel.setActive(surface?.id === "timeline");
+    filesPanel.setActive(surface?.id === "files");
+    terminalPanel.setActive(surface?.id === "terminal");
+    browserPanel.setActive(surface?.id === "browser");
+    if (focused instanceof HTMLInputElement && focused.isConnected && document.activeElement !== focused) {
+      focused.focus({ preventScroll: true });
+      if (caret !== undefined && caret.start !== null && caret.end !== null) focused.setSelectionRange(caret.start, caret.end);
     }
     body.scrollTop = scroll;
     for (const node of body.querySelectorAll<HTMLElement>(".git-diff-scroll:not(.split), .git-split-pane")) {
@@ -286,7 +321,7 @@ export function mountWorkbench(root: HTMLElement, store: Store, isVisible: () =>
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") void refresh();
   });
-  window.addEventListener("beforeunload", () => window.clearInterval(interval), { once: true });
+  window.addEventListener("unload", () => window.clearInterval(interval), { once: true });
   store.watch((state) => [state.selection.projectId, state.host.status, state.runs, Object.keys(state.live).join("|")], () => {
     const selected = store.get().selection.projectId;
     if (selected !== projectId) {
@@ -330,6 +365,7 @@ function renderLauncher(surfaces: readonly SurfaceDefinition[], open: (id: strin
     h("div", { class: "launcher-list" },
       ...surfaces.map((surface) => h("button", {
         class: "launcher-item",
+        type: "button",
         title: surface.description,
         onClick: () => open(surface.id),
       },
@@ -343,12 +379,12 @@ function renderLauncher(surfaces: readonly SurfaceDefinition[], open: (id: strin
 }
 
 function renderSurface(surface: SurfaceDefinition, back: () => void, content?: HTMLElement): HTMLElement {
-  return h("div", { class: "surface" },
+  return h("div", { class: "surface", data: { surface: surface.id } },
     h("div", { class: "surface-header" },
-      h("button", { class: "icon-button", title: "All surfaces", aria: { label: "All surfaces" }, onClick: back }, icon("arrow-left")),
+      h("button", { class: "icon-button", type: "button", title: "All surfaces", aria: { label: "All surfaces" }, onClick: back }, icon("arrow-left")),
       icon(surface.icon),
       h("span", { class: "surface-title" }, surface.title),
-      surface.kind === "plugin" ? h("span", { class: "soon" }, "Preview") : null,
+      surface.preview ? h("span", { class: "soon" }, "Preview") : null,
     ),
     content ?? h("div", { class: "placeholder" },
       h("span", { class: "placeholder-icon" }, icon(surface.icon)),

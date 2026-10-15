@@ -22,6 +22,8 @@ import type {
   SpeedOption,
 } from "../../core/execution/types.js";
 import { AsyncQueue } from "../../core/shared/async-queue.js";
+import { nativeQuestions } from "./user-questions.js";
+import { startAppToolServer } from "./app-tool-server.js";
 
 /**
  * Claude Agent SDK adapter.
@@ -158,8 +160,19 @@ export class ClaudeRuntimeAdapter implements RuntimeAdapter {
     let seenSessionId: string | undefined;
     const eventState: ClaudeEventState = { messageId: "", nextMessage: 0, streamed: new Map(), tools: new Map() };
     let activeQuery: ReturnType<typeof query> | undefined;
+    let appTools: Awaited<ReturnType<typeof startAppToolServer>>;
     try {
       const options = this.options(input, environment, sdkAbort);
+      appTools = await startAppToolServer(input.tools ?? [], input.signal);
+      if (appTools !== undefined) {
+        options.mcpServers = { ...options.mcpServers, rack: { type: "http", url: appTools.url, headers: { Authorization: `Bearer ${appTools.token}` } } };
+        // Core owns Ask mode's broker and the defensive read-only deny.
+        // Automatic mode must still pass through Claude's native reviewer;
+        // allow-listing it there would silently bypass that review.
+        if (input.permissionMode !== "approve_for_me") {
+          options.allowedTools = [...(options.allowedTools ?? []), ...(input.tools ?? []).map((tool) => `mcp__rack__${tool.name}`)];
+        }
+      }
       activeQuery = this.createQuery({ prompt: input.prompt, options });
       this.activeQueries.set(input.attemptId, activeQuery);
       for await (const rawMessage of activeQuery) {
@@ -187,6 +200,7 @@ export class ClaudeRuntimeAdapter implements RuntimeAdapter {
       // Query.close is safe after normal completion and releases the SDK
       // child process and any MCP transports held by the query.
       activeQuery?.close();
+      await appTools?.close();
       this.activeQueries.delete(input.attemptId);
     }
   }
@@ -233,6 +247,22 @@ export class ClaudeRuntimeAdapter implements RuntimeAdapter {
       // that native boundary; read tools permitted by plan mode still run.
       options.canUseTool = async () => ({ behavior: "deny", message: "Read only mode does not permit this action." });
     }
+    const permissionHandler = options.canUseTool;
+    // Question answers are independent of action permissions. Even native
+    // auto-review/bypass modes must collect the user's own answer here.
+    options.canUseTool = async (toolName, toolInput, callbackOptions): Promise<PermissionResult> => {
+      if (toolName !== "AskUserQuestion") return permissionHandler === undefined
+        ? { behavior: "deny", message: "Native permission policy did not authorize this action." }
+        : (await permissionHandler(toolName, toolInput, callbackOptions)) ?? { behavior: "deny", message: "This action was not authorized." };
+      if (callbackOptions.signal.aborted || input.signal.aborted || input.requestQuestions === undefined) {
+        return { behavior: "deny", message: "Question input is unavailable or was interrupted." };
+      }
+      const questions = nativeQuestions(toolInput, "claude");
+      const response = await input.requestQuestions(questions, AbortSignal.any([callbackOptions.signal, input.signal]));
+      if (response === null) return { behavior: "deny", message: "The user dismissed these questions." };
+      return { behavior: "allow", updatedInput: { ...toolInput,
+        answers: Object.fromEntries(questions.map((question) => [question.question, response.answers[question.id]!.join(", ")])) } };
+    };
     return options;
   }
 }

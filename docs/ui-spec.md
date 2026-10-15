@@ -19,7 +19,7 @@ When starting a run without an explicit account, the UI should show the selected
 
 ## Project context
 
-Before starting a run, the UI selects a project folder, model, account, and permission mode. A project is the selected folder, with one identity shared by the UI, sessions, model discovery, and execution. Adding a folder through the native picker creates one project; its label is derived from the path. The model catalog is a list-only control: it queries every connected account through `models.list`, groups returned entries by provider, and never accepts a free-form model string. Provider and runtime routing are host metadata and are not user-facing controls. The host may return partial account discovery failures alongside successful entries; show available entries and a clear warning for failed accounts. If the catalog is empty, explain that a provider account must be connected or rechecked and keep the run action disabled. Refresh the catalog after account changes and when the selected project changes. A project shows its path, starting revision when present, and active writer attempt when present. Project and session creation do not expose editable text fields; paths come from the native folder picker and session titles use generated defaults.
+Before starting a run, the UI selects a project folder, model, account, and permission mode. A project is the selected folder, with one identity shared by the UI, sessions, model discovery, and execution. Adding a folder through the native picker creates one project; its label is derived from the path. The model catalog is a list-only control: it queries every connected account through `models.list`, groups returned entries by provider, and never accepts a free-form model string. Settings > Models shows the full catalog for starring; the composer shows only currently available favorites. Empty favorites never fall back to unstarred models: offer Choose favorites and disable sending. Saved favorites survive unavailable accounts and catalog refreshes. Provider and runtime routing are host metadata and are not user-facing controls. The host may return partial account discovery failures alongside successful entries; show available favorites and a clear warning for failed accounts. If the catalog is empty, explain that a provider account must be connected or rechecked and keep the run action disabled. Refresh the catalog after account changes and when the selected project changes. A project shows its path, starting revision when present, and active writer attempt when present. Project and session creation do not expose editable text fields; paths come from the native folder picker and session titles use generated defaults.
 
 The host exposes `projects.list` and `projects.create`; the core provides `ProjectsService.createProject`, `listProjects`, and `getProject`. Sessions, runs, and model queries use `projectId`. Starting an editing run against a busy project shows the owning attempt and offers retry after it releases; it does not silently start a second writer.
 
@@ -42,7 +42,7 @@ The host returns an `ExecutionHandle` with `events`, `completed`, `respondToAppr
 
 ## Streaming transcript and tools
 
-Consecutive tool calls and unpaired tool outputs form one borderless collapsed disclosure with a call count and aggregate status. Text, thinking, and status items break groups. Expanding a group exposes the existing per-call disclosures; a single call keeps its individual row. Group and nested-call expansion choices survive streaming redraws. Imported and saved activity follows the same grouping rules.
+Consecutive tool calls, unpaired tool outputs, and the thinking items between them form one borderless collapsed disclosure with tool-call and thought counts and an aggregate status. Only text and status items break groups. Expanding a group exposes the existing per-call disclosures and thinking panels in order. A single call keeps its individual row, and runs of thinking without any tool call stay standalone. Group and nested-call expansion choices survive streaming redraws. Imported and saved activity follows the same grouping rules.
 
 The composer clipboard icon opens an upward action menu for Images, Documents,
 Code and text, and Any file. A native picker allows multiple files; removable
@@ -95,6 +95,14 @@ The first UI implementation added host-facing list/read queries for projects, se
 
 ## Local session import
 
+Timeline's default **Project history** view supports existing Git projects independently of a selected session: HEAD commits and saved Rack/Codex/Relay timeline refs are readable immediately. The **This session** view keeps recording opt-in and exact-session import. History entries identify Git commits versus run observations and reuse the compact file tree and diff preview. Reads do not enable recording or assign other sessions' history to the current session. See [Timeline](timeline.md) for the current implementation and limits.
+
+An expand icon opens each Timeline entry or selected preview in its own native snapshot window. The viewer offers Changed files / All files, a collapsible folder tree and file filter, and **Diff**, **Before / After** (split), and **Full context**. Context includes unchanged source around the changes; All files exposes unchanged historical files and deleted files from the before tree. The viewer is read-only, stays pinned independently of main-window selection, and closes with Escape or its close control.
+
+The viewer's **Timeline change** dropdown switches between project commits and saved observations; its **View mode** dropdown offers **Diff**, **Before / After**, and **Full context**. Open menus consume Escape first. Project history automatically records saved Git projects while Rack is open and offers persisted Pause/Resume; no existing Timeline or session is needed. This is separate from per-session run recording.
+
+Before / After highlights added or replacement lines on the After side using the complete Git patch. Shortened patches keep exact contents with a highlighting-unavailable notice. A project container with one nested repository is supported through bounded discovery; ambiguous or incomplete scans explain that a repository folder must be opened.
+
 Each project row offers an import action. The modal discovers local Codex and Claude sessions for the exact folder, reports source failures separately, previews recent conversation independently of selection, and imports checked sessions. Select all applies only to sessions not already imported. The selected count and partial-failure report remain explicit, and successful imports are preserved for retries. Already imported sessions open their existing Rack conversation. Imported messages appear before new Rack runs with explicit source and fresh-context continuation wording. Tool history is read-only; preview truncation does not truncate stored history. See [local session import](session-import.md).
 
 The composer permission picker shows labels only: Ask me, Approve for me, Full access, Read only. Thinking and tool activity must remain visible when runs finish and after reopening a session; reconstruct persisted activity from its journal rather than only the final assistant message.
@@ -110,3 +118,22 @@ Do not show the response timestamp until the run leaves queued/running state. Sh
 ## Git Changes browser (updated 2026-10-14)
 
 The right Changes surface follows a compact Source Control file-list layout. Group normalized host file records into Staged Changes, Changes, and Merge Changes, with counts and status-letter decorations. A partially staged file appears once in each applicable section; clicking a row selects that section's comparison. Render one selected diff with old/new line numbers and colored additions/deletions, offering inline or split view. Split panes keep both versions visible and synchronize vertical scrolling. Keep current selection, expansion and scroll position through polling, and discard stale project/repository replies. Show binary/large-preview notices rather than treating absent text as a clean repository. Discovery actions belong in an options menu. File opening remains a separate safe desktop operation, disabled for deleted files. See [Changes panel](changes-view.md).
+
+## Terminal, Browser and Files
+
+Settings > Plugins enables these functional right-panel surfaces; only
+Retrospective and Orchestration remain previews. The launcher offers T/B/F
+shortcuts outside text inputs. Terminal is an interactive project PTY, with
+context reconnection, resize, explicit Close/New shell and exit status. Browser
+is one isolated live page per conversation shared by the user and agent, with
+address/history controls and user-owned Pause/Resume. Files browses the current
+project and edits existing UTF-8 files with explicit Save, conflict-preserved
+drafts and confirmation before discarding. Persistent panels retain focus
+and draft/input state while other UI state changes.
+
+Browser snapshots and scrolling work in read-only mode; browser mutations are
+denied. Ask mode uses Rack's approval broker, Approve for me preserves native
+provider review without an extra Rack prompt, and Full access executes directly.
+Agent control pause remains effective in every mode. Manual shell input and
+explicit file saves are user actions, independent of model permissions.
+See [desktop tools](desktop-tools.md) for ownership, exact controls and limits.

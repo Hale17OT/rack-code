@@ -19,8 +19,14 @@ import {
   optional,
   text,
   type Validator,
+  ContractValidationError,
 } from "./validation.js";
+import { parseQuestionResponse, type UserQuestionResponse } from "../../core/execution/question-types.js";
 import { MAX_ATTACHMENTS, type SessionAttachment } from "../../core/sessions/attachments.js";
+import type { FileListing, FileDocument } from "../../features/files/index.js";
+import type { TerminalSnapshot } from "../../features/terminal/types.js";
+import type { BrowserRequest, BrowserSnapshot } from "../../features/browser/index.js";
+import { integer } from "./validation.js";
 import type { ProjectChanges, ProjectRepositories, RepositoryDiscoveryOptions } from "./views.js";
 import {
   PERMISSION_MODES,
@@ -41,6 +47,14 @@ import {
   type SessionDiscovery,
   type ExternalSessionSnapshot,
   type ImportSessionResult,
+  type TimelineCheckpointList,
+  type TimelineProjectHistory,
+  type TimelineFileDiff,
+  type TimelineStatus,
+  type TimelineSnapshotTarget,
+  type TimelineSnapshot,
+  type TimelineSnapshotHistory,
+  type TimelineSnapshotFileView,
 } from "./views.js";
 
 /** Opaque credential reference; the host obtains it, never the secret. */
@@ -80,6 +94,15 @@ export interface StartRunParams {
 type NoParams = Record<string, never>;
 
 export interface HostCommandMap {
+  "files.list": { params: { projectId: string; path: string }; result: FileListing };
+  "files.read": { params: { projectId: string; path: string }; result: FileDocument };
+  "files.save": { params: { projectId: string; path: string; text: string; version: string }; result: FileDocument };
+  "terminal.open": { params: { projectId: string; sessionId?: string; cols: number; rows: number }; result: TerminalSnapshot };
+  "terminal.read": { params: { terminalId: string; after: number }; result: TerminalSnapshot };
+  "terminal.write": { params: { terminalId: string; data: string }; result: null };
+  "terminal.resize": { params: { terminalId: string; cols: number; rows: number }; result: null };
+  "terminal.close": { params: { terminalId: string }; result: null };
+  "browser.control": { params: { sessionId: string; request: BrowserRequest }; result: BrowserSnapshot };
   "accounts.list": { params: NoParams; result: readonly AccountView[] };
   "accounts.register": { params: RegisterAccountParams; result: AccountView };
   "accounts.select": { params: { readonly providerId: string; readonly accountId: string }; result: AccountView };
@@ -117,6 +140,7 @@ export interface HostCommandMap {
   };
   "sessions.get": { params: { readonly sessionId: string }; result: SessionView };
   "sessions.attachFiles": { params: { readonly sessionId: string; readonly paths: readonly string[] }; result: readonly SessionAttachment[] };
+  "sessions.remove": { params: { readonly sessionId: string }; result: null };
   "sessions.discover": { params: { readonly projectId: string }; result: SessionDiscovery };
   "sessions.previewImport": {
     params: { readonly projectId: string; readonly sourceId: string; readonly nativeSessionId: string };
@@ -141,6 +165,33 @@ export interface HostCommandMap {
     result: null;
   };
   "runs.cancel": { params: { readonly runId: string }; result: null };
+  "runs.respondToQuestions": { params: { readonly runId: string; readonly requestId: string; readonly response: UserQuestionResponse | null }; result: null };
+  /*
+   * Optional Timeline feature. A host assembled without Timeline answers
+   * these with `feature_unavailable`.
+   */
+  /** Capability and opt-in state for one session; unsupported projects are not errors. */
+  "timeline.status": { params: { readonly sessionId: string }; result: TimelineStatus };
+  /** Enabling imports exact-session history and starts future capture; disabling keeps history. */
+  "timeline.setEnabled": { params: { readonly sessionId: string; readonly enabled: boolean }; result: TimelineStatus };
+  /** Visible checkpoints, oldest first, with current display filtering applied. */
+  "timeline.checkpoints": { params: { readonly sessionId: string }; result: TimelineCheckpointList };
+  /** Read-only HEAD history and saved snapshots from every session in the repository. */
+  "timeline.projectHistory": { params: { readonly projectId: string }; result: TimelineProjectHistory };
+  "timeline.setProjectEnabled": { params: { readonly projectId: string; readonly enabled: boolean }; result: TimelineProjectHistory };
+  /** Historical file tree and exact file contents; IDs are resolved by Timeline. */
+  "timeline.snapshot": { params: TimelineSnapshotTarget; result: TimelineSnapshot };
+  "timeline.snapshotHistory": { params: TimelineSnapshotTarget; result: TimelineSnapshotHistory };
+  "timeline.snapshotFile": { params: TimelineSnapshotTarget & { readonly path: string }; result: TimelineSnapshotFileView };
+  "timeline.projectFileDiff": {
+    params: { readonly projectId: string; readonly checkpointId: string; readonly path: string };
+    result: TimelineFileDiff;
+  };
+  /** Patch for one visible changed path of a checkpoint. */
+  "timeline.fileDiff": {
+    params: { readonly sessionId: string; readonly checkpointId: string; readonly path: string };
+    result: TimelineFileDiff;
+  };
 }
 
 export type HostCommand = keyof HostCommandMap;
@@ -152,6 +203,19 @@ const credential = object({ id, providerId: id, method: id });
 
 /** Runtime validators, one per command, typed against `HostCommandMap`. */
 export const COMMAND_VALIDATORS: { readonly [C in HostCommand]: Validator<CommandParams<C>> } = {
+  "files.list": object({ projectId: id, path: text({ allowEmpty: true }) }),
+  "files.read": object({ projectId: id, path: text() }),
+  "files.save": object({ projectId: id, path: text(), text: text({ allowEmpty: true, maxLength: 1_048_576 }), version: text({ maxLength: 64 }) }),
+  "terminal.open": object({ projectId: id, sessionId: optional(id), cols: integer(2, 500), rows: integer(1, 300) }),
+  "terminal.read": object({ terminalId: id, after: integer(0, Number.MAX_SAFE_INTEGER) }),
+  "terminal.write": object({ terminalId: id, data: text({ allowEmpty: true, maxLength: 65_536 }) }),
+  "terminal.resize": object({ terminalId: id, cols: integer(2, 500), rows: integer(1, 300) }),
+  "terminal.close": object({ terminalId: id }),
+  "browser.control": object({ sessionId: id, request: object({
+    action: oneOf(["state", "navigate", "back", "forward", "reload", "snapshot", "click", "type", "select", "press", "scroll", "agent", "close"]),
+    actor: optional(oneOf(["user", "agent"])), url: optional(text()), ref: optional(text({ maxLength: 40 })), text: optional(text({ allowEmpty: true, maxLength: 10_000 })),
+    x: optional(integer(-10_000, 10_000)), y: optional(integer(-10_000, 10_000)), enabled: optional(boolean),
+  }) }),
   "accounts.list": empty,
   "accounts.register": object({
     providerId: id,
@@ -179,6 +243,7 @@ export const COMMAND_VALIDATORS: { readonly [C in HostCommand]: Validator<Comman
   "sessions.create": object({ projectId: id, title: optional(text({ maxLength: 256 })) }),
   "sessions.get": object({ sessionId: id }),
   "sessions.attachFiles": object({ sessionId: id, paths: array(text(), MAX_ATTACHMENTS) }),
+  "sessions.remove": object({ sessionId: id }),
   "sessions.discover": object({ projectId: id }),
   "sessions.previewImport": object({ projectId: id, sourceId: id, nativeSessionId: id }),
   "sessions.import": object({ projectId: id, sourceId: id, nativeSessionId: id }),
@@ -206,6 +271,19 @@ export const COMMAND_VALIDATORS: { readonly [C in HostCommand]: Validator<Comman
   "runs.active": empty,
   "runs.respondToApproval": object({ runId: id, approvalId: id, decision: oneOf(["allow", "deny"]) }),
   "runs.cancel": object({ runId: id }),
+  "runs.respondToQuestions": object({ runId: id, requestId: id, response: (value: unknown, path: string) => {
+    try { return parseQuestionResponse(value); } catch (error) { throw new ContractValidationError(path, error instanceof Error ? error.message : "Invalid question answers."); }
+  } }),
+  "timeline.status": object({ sessionId: id }),
+  "timeline.setEnabled": object({ sessionId: id, enabled: boolean }),
+  "timeline.checkpoints": object({ sessionId: id }),
+  "timeline.projectHistory": object({ projectId: id }),
+  "timeline.setProjectEnabled": object({ projectId: id, enabled: boolean }),
+  "timeline.snapshot": object({ scope: oneOf(["project", "session"]), contextId: id, checkpointId: id }),
+  "timeline.snapshotHistory": object({ scope: oneOf(["project", "session"]), contextId: id, checkpointId: id }),
+  "timeline.snapshotFile": object({ scope: oneOf(["project", "session"]), contextId: id, checkpointId: id, path: text({ maxLength: 4096 }) }),
+  "timeline.projectFileDiff": object({ projectId: id, checkpointId: id, path: text() }),
+  "timeline.fileDiff": object({ sessionId: id, checkpointId: id, path: text() }),
 };
 
 /** Narrows an untrusted method name to a known command. */

@@ -8,7 +8,7 @@
  *   renderer/app.js         renderer bundle (browser IIFE, no Node APIs)
  *   renderer/index.html     copied as-is
  *   renderer/styles.css     copied as-is
- *   renderer/fonts/*.woff2  Inter and IBM Plex Mono, bundled so the strict
+ *   renderer/fonts/*.woff2  Inter, IBM Plex Mono and Geist Mono, so the strict
  *                           CSP never needs a remote font host
  *
  * Phosphor icon SVGs are imported by the renderer and inlined as text.
@@ -73,15 +73,18 @@ const targets: BuildOptions[] = [
   },
 ];
 
-/** Font files copied next to the renderer; names are referenced by styles.css. */
+/** Bundled fonts and license; font filenames are referenced by styles.css. */
 const FONTS: ReadonlyArray<readonly [string, string]> = [
   ["@fontsource-variable/inter/files/inter-latin-wght-normal.woff2", "inter-variable.woff2"],
+  ["@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2", "geist-mono-variable.woff2"],
+  ["@fontsource-variable/geist-mono/LICENSE", "geist-mono-LICENSE.txt"],
   ["@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-400-normal.woff2", "ibm-plex-mono-400.woff2"],
   ["@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-500-normal.woff2", "ibm-plex-mono-500.woff2"],
 ];
 
 async function copyStatic(): Promise<void> {
   await mkdir(join(outDirectory, "renderer", "fonts"), { recursive: true });
+  await copyFile(join(root, "node_modules/@xterm/xterm/css/xterm.css"), join(outDirectory, "renderer/xterm.css"));
   for (const file of ["index.html", "styles.css"]) {
     await copyFile(join(root, "src/desktop/renderer", file), join(outDirectory, "renderer", file));
   }

@@ -37,6 +37,13 @@ export type HostEvent =
   | { readonly type: "projects.changed" }
   /** A project's sessions changed (new session, new message). */
   | { readonly type: "sessions.changed"; readonly projectId: string; readonly sessionId: string }
+  /** A saved conversation was removed; clients must evict its cached history. */
+  | { readonly type: "sessions.removed"; readonly projectId: string; readonly sessionId: string }
+  /**
+   * A session's Timeline checkpoints or settings changed (optional feature).
+   * A freshness signal: clients re-read with `timeline.checkpoints`.
+   */
+  | { readonly type: "timeline.changed"; readonly sessionId: string }
   /**
    * Connection state of the execution host as seen by Electron main. Emitted
    * by main rather than the host, because a crashed host cannot report itself.

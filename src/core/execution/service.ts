@@ -17,6 +17,7 @@ import type { ExecutionStore } from "./ports.js";
 import { AsyncQueue } from "../shared/async-queue.js";
 import { RuntimeRegistry } from "./runtime-registry.js";
 import type {
+  UserQuestionResponse,
   ApprovalDecision,
   ApprovalRequest,
   AttemptRecord,
@@ -26,6 +27,8 @@ import type {
   RuntimeEvent,
   RuntimeRunInput,
 } from "./types.js";
+import { QuestionBroker } from "./question-broker.js";
+import type { AppTool, RuntimeAppTool } from "./app-tools.js";
 
 export interface StartRunInput {
   readonly attachmentIds?: readonly string[];
@@ -49,12 +52,15 @@ export interface ExecutionHandle {
   readonly events: AsyncIterable<RuntimeEvent>;
   readonly completed: Promise<RunRecord>;
   respondToApproval(approvalId: string, decision: ApprovalDecision): void;
+  respondToQuestions?(requestId: string, response: UserQuestionResponse | null): Promise<void>;
   cancel(): Promise<void>;
 }
 
 export interface ExecutionServiceOptions {
   readonly now?: () => Date;
   readonly createId?: () => string;
+  /** Composition supplies optional capabilities; core never imports features. */
+  readonly tools?: (sessionId: string) => readonly AppTool[];
 }
 
 /**
@@ -68,6 +74,7 @@ export interface ExecutionServiceOptions {
 export class ExecutionService {
   private readonly now: () => Date;
   private readonly createId: () => string;
+  private readonly tools: ExecutionServiceOptions["tools"];
 
   constructor(
     private readonly store: ExecutionStore,
@@ -79,6 +86,7 @@ export class ExecutionService {
   ) {
     this.now = options.now ?? (() => new Date());
     this.createId = options.createId ?? randomUUID;
+    this.tools = options.tools;
   }
 
   async start(input: StartRunInput): Promise<ExecutionHandle> {
@@ -149,6 +157,10 @@ export class ExecutionService {
         });
       },
     );
+    const questions = new QuestionBroker(this.createId, async (event) => {
+      await this.store.appendJournal({ runId, attemptId, type: event.type, payload: event, observedAt: this.now().toISOString() });
+      queue.push(event);
+    });
     let currentRun = run;
     let currentAttempt = attempt;
     let cancelled = false;
@@ -164,6 +176,7 @@ export class ExecutionService {
       controller,
       queue,
       approvals,
+      questions,
       onRun: (next) => {
         currentRun = next;
       },
@@ -183,9 +196,14 @@ export class ExecutionService {
       events: queue,
       completed,
       respondToApproval: (approvalId, decision) => approvals.respond(approvalId, decision),
+      respondToQuestions: (requestId, response) => questions.respond(requestId, response),
       cancel: async () => {
         cancelled = true;
         controller.abort();
+        // App-owned MCP calls can be parked in this broker while the native
+        // runtime waits for their response. Release them before awaiting the
+        // runtime's cancellation handshake, otherwise both sides deadlock.
+        approvals.close();
         await runtime.cancel({ attemptId, signal: controller.signal });
       },
     };
@@ -250,6 +268,7 @@ export class ExecutionService {
       controller,
       queue,
       approvals,
+      questions,
       onRun,
       onAttempt,
       getAssistantText,
@@ -280,6 +299,24 @@ export class ExecutionService {
       });
       await this.accounts.markUsed(account.id);
 
+      const appTools: readonly RuntimeAppTool[] = (this.tools?.(input.sessionId) ?? []).map((tool) => ({
+        name: tool.name, description: tool.description, inputSchema: tool.inputSchema,
+        execute: async (arguments_) => {
+          if (controller.signal.aborted) throw new Error("Run was interrupted.");
+          if (tool.isMutation(arguments_)) {
+            if (input.permissionMode === "read_only") throw new Error("Read only mode does not allow this browser action.");
+            // Ask mode parks the application-owned action in the same broker
+            // as native requests. Automatic mode leaves review to the runtime
+            // before it invokes the authenticated MCP endpoint; adapters must
+            // not allow-list these tools past the provider's native reviewer.
+            if (input.permissionMode === "ask") {
+              const decision = await approvals.request({ tool: tool.name, input: { action: arguments_ }, reason: "Allow this action in the shared browser?" });
+              if (decision !== "allow" || controller.signal.aborted) throw new Error("Browser action was not approved.");
+            }
+          }
+          return tool.execute(arguments_, controller.signal);
+        },
+      }));
       let runtimeInput: RuntimeRunInput = {
         runId: currentRun.id,
         attemptId: currentAttempt.id,
@@ -297,6 +334,8 @@ export class ExecutionService {
         ...(input.speed === undefined ? {} : { speed: input.speed }),
         permissionMode: input.permissionMode,
         signal: controller.signal,
+        ...(appTools.length === 0 ? {} : { tools: appTools }),
+        requestQuestions: (items, signal) => questions.request(items, signal === undefined ? controller.signal : AbortSignal.any([controller.signal, signal])),
         requestApproval: async (request) => {
           if (input.permissionMode === "read_only") {
             return "deny";
@@ -396,6 +435,10 @@ export class ExecutionService {
       });
     } finally {
       approvals.close();
+      try { await questions.close(); } catch {
+        // A failed answer-journal write must not leave the project locked.
+        // Final run persistence below still reports its own storage failures.
+      }
       try {
         await this.projects.releaseWriter(input.projectId, currentAttempt.id);
       } catch {
@@ -462,6 +505,7 @@ interface ConsumeContext {
   readonly controller: AbortController;
   readonly queue: AsyncQueue<RuntimeEvent>;
   readonly approvals: ApprovalBroker;
+  readonly questions: QuestionBroker;
   readonly onRun: (run: RunRecord) => void;
   readonly onAttempt: (attempt: AttemptRecord) => void;
   readonly getAssistantText: () => string;
@@ -470,6 +514,7 @@ interface ConsumeContext {
 }
 
 class ApprovalBroker {
+  private closed = false;
   private readonly pending = new Map<
     string,
     { resolve: (decision: ApprovalDecision) => void }
@@ -482,6 +527,7 @@ class ApprovalBroker {
   ) {}
 
   async request(request: Omit<ApprovalRequest, "id">): Promise<ApprovalDecision> {
+    if (this.closed) return "deny";
     const full: ApprovalRequest = { ...request, id: this.createId() };
     const decision = new Promise<ApprovalDecision>((resolve) => {
       this.pending.set(full.id, { resolve });
@@ -501,6 +547,7 @@ class ApprovalBroker {
   }
 
   close(): void {
+    this.closed = true;
     for (const { resolve } of this.pending.values()) {
       resolve("deny");
     }

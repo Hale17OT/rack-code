@@ -88,3 +88,235 @@ test("opening a completed session restores saved thinking and tool activity from
   assert.equal(store.get().transcripts[run.id]?.length, 3);
   assert.equal(store.get().transcripts[run.id]?.[0]?.type, "thinking_delta");
 });
+
+test("opening a chosen repository refreshes projects and selects its normal project identity", async () => {
+  const store = new ImmediateStore();
+  const project = { id: "repository", path: "/parent/repository", createdAt: stamp, updatedAt: stamp };
+  const host = { call: async (command: string) => {
+    if (command === "projects.create") return project;
+    if (command === "projects.list") return [project];
+    if (command === "models.list") return { models: [], failures: [] };
+    throw new Error(command);
+  } } as unknown as HostClient;
+  assert.equal(await new Controller(host, store).createProject({ path: project.path }), true);
+  assert.deepEqual(store.get().projects, [project]);
+  assert.equal(store.get().selection.projectId, project.id);
+  assert.equal(store.get().selection.sessionId, undefined);
+});
+
+test("repository creation can finish after navigation without stealing the newer selection", async () => {
+  const store = new ImmediateStore();
+  store.update((state) => ({ ...state, selection: { projectId: "parent" } }));
+  const project = { id: "repository", path: "/parent/repository", createdAt: stamp, updatedAt: stamp };
+  let finish!: (value: typeof project) => void;
+  const pending = new Promise<typeof project>((resolve) => { finish = resolve; });
+  let modelReads = 0;
+  const host = { call: async (command: string) => {
+    if (command === "projects.create") return pending;
+    if (command === "projects.list") return [project];
+    if (command === "models.list") { modelReads++; return { models: [], failures: [] }; }
+    throw new Error(command);
+  } } as unknown as HostClient;
+  const controller = new Controller(host, store);
+  const opening = controller.createProject({ path: project.path }, () => store.get().selection.projectId === "parent");
+  await controller.selectProject("other");
+  finish(project);
+  assert.equal(await opening, true);
+  assert.deepEqual(store.get().projects, [project]);
+  assert.equal(store.get().selection.projectId, "other");
+  assert.equal(modelReads, 1);
+});
+
+test("returning to a recent session immediately restores its transcript without replaying journals", async () => {
+  const store = new ImmediateStore();
+  const second = { ...session, id: "second" };
+  const otherRun = { ...run, id: "other-run", sessionId: second.id };
+  store.update((state) => ({ ...state, sessions: [session, second].map((entry) => ({ ...entry, messageCount: 0 })) }));
+  let journalReads = 0;
+  let modelReads = 0;
+  const host = { call: async (command: string, params: { sessionId?: string; runId?: string }) => {
+    if (command === "sessions.get") return params.sessionId === session.id ? session : second;
+    if (command === "runs.list") return params.sessionId === session.id ? [run] : [otherRun];
+    if (command === "runs.journal") { journalReads++; return [{ type: "message_delta", payload: { type: "message_delta", text: params.runId } }]; }
+    if (command === "projects.list") return [];
+    if (command === "models.list") { modelReads++; return { models: [], failures: [] }; }
+    throw new Error(command);
+  } } as unknown as HostClient;
+  const controller = new Controller(host, store);
+  await controller.selectSession(session.id);
+  const transcript = store.get().transcripts[run.id];
+  await controller.selectSession(second.id);
+  const returning = controller.selectSession(session.id);
+  assert.equal(store.get().session?.id, session.id);
+  assert.equal(store.get().transcripts[run.id], transcript);
+  await returning;
+  assert.equal(journalReads, 2);
+  assert.equal(modelReads, 1);
+});
+
+test("session messages appear before a slow journal, and its late reply cannot replace another session", async () => {
+  const store = new ImmediateStore();
+  const second = { ...session, id: "second" };
+  let finish!: (entries: unknown[]) => void;
+  let started!: () => void;
+  const journal = new Promise<unknown[]>((resolve) => { finish = resolve; });
+  const reading = new Promise<void>((resolve) => { started = resolve; });
+  const host = { call: async (command: string, params: { sessionId?: string }) => {
+    if (command === "sessions.get") return params.sessionId === session.id ? session : second;
+    if (command === "runs.list") return params.sessionId === session.id ? [run] : [];
+    if (command === "runs.journal") { started(); return journal; }
+    if (command === "models.list") return { models: [], failures: [] };
+    if (command === "projects.list") return [];
+    throw new Error(command);
+  } } as unknown as HostClient;
+  const controller = new Controller(host, store);
+  const first = controller.selectSession(session.id);
+  await reading;
+  assert.equal(store.get().session?.id, session.id);
+  assert.equal(store.get().runs[0]?.id, run.id);
+  await controller.selectSession(second.id);
+  finish([{ type: "message_delta", payload: { type: "message_delta", text: "saved" } }]);
+  await first;
+  assert.equal(store.get().session?.id, second.id);
+  assert.equal(store.get().transcripts[run.id], undefined);
+});
+
+test("a changed persisted run invalidates its cached journal on return", async () => {
+  const store = new ImmediateStore();
+  let currentRun = run;
+  let reads = 0;
+  const host = { call: async (command: string) => {
+    if (command === "sessions.get") return session;
+    if (command === "runs.list") return [currentRun];
+    if (command === "runs.journal") { reads++; return [{ type: "message_delta", payload: { type: "message_delta", text: String(reads) } }]; }
+    if (command === "models.list") return { models: [], failures: [] };
+    throw new Error(command);
+  } } as unknown as HostClient;
+  const controller = new Controller(host, store);
+  await controller.selectSession(session.id);
+  await controller.selectProject("elsewhere");
+  currentRun = { ...run, updatedAt: "2026-10-15T00:00:00.000Z" };
+  await controller.selectSession(session.id);
+  assert.equal(reads, 2);
+  assert.equal((store.get().transcripts[run.id]?.[0] as { text: string }).text, "2");
+});
+
+test("recent-session history retention is bounded and an evicted session is reloaded", async () => {
+  const store = new ImmediateStore();
+  const sessions = Array.from({ length: 10 }, (_, index) => ({ ...session, id: `session-${index}` }));
+  store.update((state) => ({ ...state, sessions: sessions.map((entry) => ({ ...entry, messageCount: 0 })) }));
+  const reads = new Map<string, number>();
+  const host = { call: async (command: string, params: { sessionId?: string; runId?: string }) => {
+    if (command === "sessions.get") return sessions.find((entry) => entry.id === params.sessionId);
+    if (command === "runs.list") return [{ ...run, id: `run-${params.sessionId}`, sessionId: params.sessionId }];
+    if (command === "runs.journal") { reads.set(params.runId!, (reads.get(params.runId!) ?? 0) + 1); return []; }
+    if (command === "models.list") return { models: [], failures: [] };
+    if (command === "projects.list") return [];
+    throw new Error(command);
+  } } as unknown as HostClient;
+  const controller = new Controller(host, store);
+  for (const entry of sessions) await controller.selectSession(entry.id);
+  await controller.selectSession(sessions[0]!.id);
+  assert.equal(reads.get("run-session-0"), 2);
+});
+
+test("registering a repository for Timeline retains the selected conversation and messages", async () => {
+  const store = new ImmediateStore();
+  const transcripts = { [run.id]: [{ type: "message_delta" as const, text: "Keep this conversation" }] };
+  store.update((state) => ({ ...state, session, runs: [run], transcripts,
+    selection: { projectId: session.projectId, sessionId: session.id } }));
+  const project = { id: "repository", path: "/parent/repository", createdAt: stamp, updatedAt: stamp };
+  const host = { call: async (command: string) => {
+    if (command === "projects.create") return project;
+    if (command === "projects.list") return [project];
+    throw new Error(command);
+  } } as unknown as HostClient;
+  const registered = await new Controller(host, store).registerProject({ path: project.path });
+  assert.equal(registered?.id, project.id);
+  assert.equal(store.get().selection.sessionId, session.id);
+  assert.equal(store.get().selection.projectId, session.projectId);
+  assert.equal(store.get().session, session);
+  assert.equal(store.get().transcripts, transcripts);
+});
+
+test("removal evicts the selected session and its cached history without resurrecting it", async () => {
+  const store = new ImmediateStore();
+  store.update((state) => ({ ...state, sessions: [{ ...session, messageCount: 0 }] }));
+  let reads = 0;
+  const host = { call: async (command: string) => {
+    if (command === "sessions.get") { reads++; return session; }
+    if (command === "runs.list") return [run];
+    if (command === "runs.journal") return [{ type: "message_delta", payload: { type: "message_delta", text: "Saved history" } }];
+    if (command === "models.list") return { models: [], failures: [] };
+    if (command === "projects.list") return [];
+    if (command === "sessions.remove") return null;
+    throw new Error(command);
+  } } as unknown as HostClient;
+  const controller = new Controller(host, store);
+  await controller.selectSession(session.id);
+  assert.equal(await controller.removeSession(session.id), true);
+  assert.equal(store.get().session, undefined);
+  assert.deepEqual(store.get().selection, { projectId: session.projectId, sessionId: undefined, runId: undefined });
+  assert.deepEqual(store.get().sessions, []);
+  assert.deepEqual(store.get().transcripts, {});
+  await controller.selectSession(session.id);
+  assert.equal(reads, 1);
+  assert.equal(store.get().session, undefined);
+});
+
+test("removing a background session does not steal a newer selection", async () => {
+  const store = new ImmediateStore();
+  const second = { ...session, id: "second" };
+  store.update((state) => ({ ...state, session, sessions: [session, second].map((entry) => ({ ...entry, messageCount: 0 })),
+    selection: { projectId: session.projectId, sessionId: session.id } }));
+  let finish!: () => void;
+  const pending = new Promise<null>((resolve) => { finish = () => resolve(null); });
+  const host = { call: async (command: string) => {
+    if (command === "sessions.remove") return pending;
+    if (command === "sessions.get") return second;
+    if (command === "runs.list") return [];
+    throw new Error(command);
+  } } as unknown as HostClient;
+  const controller = new Controller(host, store);
+  const removing = controller.removeSession(session.id);
+  await controller.selectSession(second.id);
+  finish();
+  assert.equal(await removing, true);
+  assert.equal(store.get().session?.id, second.id);
+  assert.equal(store.get().selection.sessionId, second.id);
+});
+
+test("a removal broadcast excludes late journals and stale session-list replies", async () => {
+  const store = new ImmediateStore();
+  let emit!: (event: HostEvent) => void;
+  let finishJournal!: (value: unknown[]) => void;
+  let journalStarted!: () => void;
+  const reading = new Promise<void>((resolve) => { journalStarted = resolve; });
+  const journal = new Promise<unknown[]>((resolve) => { finishJournal = resolve; });
+  let finishList!: (value: unknown[]) => void;
+  const staleList = new Promise<unknown[]>((resolve) => { finishList = resolve; });
+  let lists = 0;
+  const host = { onEvent: (listener: typeof emit) => { emit = listener; return () => {}; },
+    call: async (command: string) => {
+      if (command === "sessions.list") return ++lists === 1 ? [{ ...session, messageCount: 0 }] : staleList;
+      if (command === "sessions.get") return session;
+      if (command === "runs.list") return [run];
+      if (command === "runs.journal") { journalStarted(); return journal; }
+      if (command === "models.list") return { models: [], failures: [] };
+      return [];
+    },
+  } as unknown as HostClient;
+  const controller = new Controller(host, store);
+  const startup = controller.start();
+  await reading;
+  emit({ type: "sessions.changed", sessionId: session.id, projectId: session.projectId });
+  emit({ type: "sessions.removed", sessionId: session.id, projectId: session.projectId });
+  finishList([{ ...session, messageCount: 0 }]);
+  finishJournal([{ type: "message_delta", payload: { type: "message_delta", text: "Must stay removed" } }]);
+  await startup;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(store.get().selection.sessionId, undefined);
+  assert.deepEqual(store.get().sessions, []);
+  assert.deepEqual(store.get().transcripts, {});
+  assert.equal(store.get().notice, undefined);
+});

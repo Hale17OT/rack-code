@@ -1,6 +1,7 @@
 /**
  * Compact composer dropdown for model, reasoning and speed. Its plain model
- * list transforms into the selected model's reasoning slider and Fast tag.
+ * list contains only available favorites and transforms into the selected
+ * model's reasoning slider and Fast tag. An empty list links to Settings.
  * Choices apply immediately to the next turn. The shared popover handles
  * outside clicks/Escape; content changes re-anchor it against the pill.
  */
@@ -9,18 +10,21 @@ import { h, replace } from "../dom.js";
 import { icon } from "../icons.js";
 import { openPopover, type PopoverHandle } from "./popover.js";
 import { effortStops, fastOptions, modelKey, PROVIDER_DEFAULT, selectedEffort, selectedSpeed } from "./model-settings.js";
+import { favoriteModels } from "../model-favorites.js";
 
 export interface ModelPicker {
   readonly element: HTMLButtonElement;
   readonly selected: ModelView | undefined;
   readonly reasoningEffort: string | undefined;
   readonly speed: string | undefined;
-  update(models: readonly ModelView[]): void;
+  update(models: readonly ModelView[], favoriteKeys: readonly string[]): void;
   setDisabled(disabled: boolean): void;
 }
 
-export function createModelPicker(onChange: () => void): ModelPicker {
+export function createModelPicker(onChange: () => void, onManageFavorites: () => void): ModelPicker {
   let models: readonly ModelView[] = [];
+  let catalog: readonly ModelView[] | undefined;
+  let favorites: readonly string[] | undefined;
   let selectedKey: string | undefined;
   let popover: PopoverHandle | undefined;
   let body: HTMLElement | undefined;
@@ -55,7 +59,7 @@ export function createModelPicker(onChange: () => void): ModelPicker {
     const options = entry === undefined ? undefined : fastOptions(entry);
     const fast = options !== undefined && options.fast.id === speed();
     replace(trigger,
-      h("span", { class: "dropdown-value" }, entry?.label ?? "Choose a model"),
+      h("span", { class: "dropdown-value" }, entry?.label ?? (catalog?.length ? "Choose favorites" : "Choose a model")),
       effort === undefined ? null : h("span", { class: "model-pill-effort" }, effort.label),
       fast ? icon("lightning", { className: "model-pill-fast" }) : null,
       icon("caret-up-down", { className: "dropdown-caret" }));
@@ -86,7 +90,8 @@ export function createModelPicker(onChange: () => void): ModelPicker {
   function focusModel(last = false): void {
     const items = [...(body?.querySelectorAll<HTMLButtonElement>(".model-choice") ?? [])];
     const target = last ? items.at(-1) : items.find((item) => item.dataset["modelKey"] === selectedKey) ?? items[0];
-    target?.focus(); target?.scrollIntoView({ block: "nearest" });
+    const focus = target ?? body?.querySelector<HTMLButtonElement>(".model-manage-favorites");
+    focus?.focus(); focus?.scrollIntoView({ block: "nearest" });
   }
 
   function renderBody(): void {
@@ -112,9 +117,14 @@ export function createModelPicker(onChange: () => void): ModelPicker {
           },
         }, h("span", { class: "menu-text" }, h("span", { class: "menu-label" }, entry.label)),
           modelKey(entry) === selectedKey ? icon("check", { className: "menu-check" }) : null)),
-      ]), models.length === 0 ? h("p", { class: "model-empty" }, "No models available") : null);
+      ]), models.length === 0 ? h("div", { class: "model-empty" },
+        h("p", {}, "No favorite models available."),
+        h("button", { class: "button button-small model-manage-favorites", type: "button", onClick: () => {
+          popover?.close(); onManageFavorites();
+        } }, "Choose favorites")) : null);
     list.addEventListener("keydown", (event) => {
       const items = [...list.querySelectorAll<HTMLButtonElement>(".model-choice")];
+      if (items.length === 0) return;
       const index = items.indexOf(document.activeElement as HTMLButtonElement);
       let target: number | undefined;
       if (event.key === "ArrowDown") target = (index + 1) % items.length;
@@ -190,12 +200,13 @@ export function createModelPicker(onChange: () => void): ModelPicker {
   renderTrigger();
   return {
     element: trigger, get selected() { return selected(); }, get reasoningEffort() { return reasoning(); }, get speed() { return speed(); },
-    update(next) {
-      if (models === next) return;
+    update(next, favoriteKeys) {
+      if (catalog === next && favorites === favoriteKeys) return;
       const focused = body?.contains(document.activeElement) ? document.activeElement?.getAttribute("aria-label") : undefined;
-      models = next;
+      catalog = next; favorites = favoriteKeys;
+      models = favoriteModels(next, favoriteKeys);
       if (selected() === undefined) {
-        const first = next.find((entry) => entry.isDefault) ?? next[0];
+        const first = models.find((entry) => entry.isDefault) ?? models[0];
         selectedKey = first === undefined ? undefined : modelKey(first);
       }
       renderTrigger(); renderBody();

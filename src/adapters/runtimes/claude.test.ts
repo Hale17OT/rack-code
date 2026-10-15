@@ -21,8 +21,7 @@ test("Claude maps permission choices to native SDK modes without manual prompts 
     assert.equal(options.permissionMode, native);
     assert.equal(options.resume, "native");
     assert.equal(options.allowDangerouslySkipPermissions === true, mode === "full_access");
-    if (mode === "approve_for_me" || mode === "full_access") assert.equal(options.canUseTool, undefined);
-    else {
+    {
       const input = { command: "touch file.txt" };
       const result = await options.canUseTool!("Bash", input, { signal: new AbortController().signal, toolUseID: "call", requestId: "request" });
       assert.ok(result);
@@ -30,6 +29,27 @@ test("Claude maps permission choices to native SDK modes without manual prompts 
       assert.equal(approvals, mode === "ask" ? 1 : 0);
       if (result.behavior === "allow") assert.deepEqual(result.updatedInput, input);
     }
+  }
+});
+
+test("Claude questions collect answers in every permission mode without requesting action approval", async () => {
+  for (const mode of ["ask", "approve_for_me", "full_access", "read_only"] as const) {
+    let options!: import("@anthropic-ai/claude-agent-sdk").Options;
+    // Exercise the same SDK option builder used for a real query.
+    const capturing = new ClaudeRuntimeAdapter({ resolve: async () => ({ environment: {} }) }, { resolve: async () => ({ directory: "/context" }) },
+      ((value: { options: typeof options }) => { options = value.options; return { async *[Symbol.asyncIterator]() { yield { type: "result", subtype: "success", result: "done" }; }, close: () => {} }; }) as unknown as typeof import("@anthropic-ai/claude-agent-sdk").query);
+    for await (const _event of capturing.startRun({ runId: "r", attemptId: "a", sessionId: "s", projectPath: "/project", prompt: "test", permissionMode: mode,
+      account: { accountId: "account", providerId: "claude", credential: { id: "c", providerId: "claude", method: "native_login" }, runtimeContextId: "ctx" },
+      signal: new AbortController().signal, requestApproval: async () => { throw new Error("Questions are not action approvals"); },
+      requestQuestions: async (questions) => {
+        assert.equal(questions[1]?.multiSelect, true);
+        assert.equal(questions[0]?.allowCustom, true);
+        return { answers: { "question-1": ["Custom format"], "question-2": ["Intro", "Summary"] } };
+      } })) { /* Drain. */ }
+    const input = { questions: [{ question: "Format?", header: "Format", options: [{ label: "Short", description: "Brief" }], multiSelect: false },
+      { question: "Sections?", header: "Sections", options: [{ label: "Intro" }, { label: "Summary" }], multiSelect: true }] };
+    const result = await options.canUseTool!("AskUserQuestion", input, { signal: new AbortController().signal, toolUseID: "tool", requestId: "request" });
+    assert.deepEqual(result, { behavior: "allow", updatedInput: { ...input, answers: { "Format?": "Custom format", "Sections?": "Intro, Summary" } } });
   }
 });
 

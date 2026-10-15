@@ -37,6 +37,13 @@ export const boolean: Validator<boolean> = (value, path) => {
   return value;
 };
 
+export function integer(min: number, max: number): Validator<number> {
+  return (value, path) => {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < min || value > max) throw new ContractValidationError(path, `expected an integer between ${min} and ${max}`);
+    return value;
+  };
+}
+
 /** A non-empty, trimmed-length-checked string. */
 export function text(options: { readonly maxLength?: number; readonly allowEmpty?: boolean } = {}): Validator<string> {
   const maxLength = options.maxLength ?? 4096;

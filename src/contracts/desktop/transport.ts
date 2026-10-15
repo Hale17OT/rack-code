@@ -10,6 +10,8 @@
 import type { CommandParams, CommandResult, HostCommand } from "./commands.js";
 import type { HostErrorPayload } from "./errors.js";
 import type { HostEvent } from "./events.js";
+import type { TimelineSnapshotTarget } from "./views.js";
+import type { BrowserPresentation, BrowserRequest, BrowserSnapshot } from "../../features/browser/index.js";
 
 /** Electron IPC channel names shared by main and preload. */
 export const IPC_CHANNELS = {
@@ -29,6 +31,9 @@ export const IPC_CHANNELS = {
    * A desktop-shell operation handled by main, not an application command.
    */
   openPath: "harness:open-path",
+  /** Opens a separate read-only snapshot window using only app identities. */
+  openTimelineWindow: "harness:open-timeline-window",
+  presentBrowser: "harness:present-browser",
 } as const;
 
 export type CommandResponse<T = unknown> =
@@ -37,6 +42,7 @@ export type CommandResponse<T = unknown> =
 
 /** Messages main sends to the host process. */
 export type HostInbound =
+  | { readonly kind: "browser_response"; readonly id: number; readonly response: CommandResponse<BrowserSnapshot> }
   | { readonly kind: "request"; readonly id: number; readonly command: HostCommand; readonly params: unknown }
   /**
    * Stop-on-exit: cancel every active run and wait (bounded by `timeoutMs`)
@@ -46,6 +52,7 @@ export type HostInbound =
 
 /** Messages the host sends to main. */
 export type HostOutbound =
+  | { readonly kind: "browser_request"; readonly id: number; readonly sessionId: string; readonly request: BrowserRequest }
   | { readonly kind: "ready" }
   | { readonly kind: "response"; readonly id: number; readonly response: CommandResponse }
   | { readonly kind: "event"; readonly event: HostEvent };
@@ -69,6 +76,13 @@ export interface HarnessBridge {
    * file manager when opening could execute it. Main resolves and checks it.
    */
   openPath(request: OpenPathRequest): Promise<OpenPathResult>;
+  openTimelineWindow(request: TimelineWindowRequest): Promise<CommandResponse<null>>;
+  presentBrowser(request: BrowserPresentation): Promise<void>;
+}
+
+export interface TimelineWindowRequest extends TimelineSnapshotTarget {
+  /** Optional initial selection; the host still validates tree membership. */
+  readonly path?: string;
 }
 
 export interface OpenPathRequest {

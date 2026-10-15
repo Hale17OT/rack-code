@@ -17,6 +17,7 @@ import { utilityProcess, type UtilityProcess } from "electron";
 import type { CommandResponse, HostInbound, HostOutbound } from "../../contracts/desktop/transport.js";
 import type { HostEvent } from "../../contracts/desktop/events.js";
 import type { HostCommand } from "../../contracts/desktop/commands.js";
+import type { BrowserRequest, BrowserSnapshot } from "../../features/browser/index.js";
 
 export interface HostProcessOptions {
   /** Absolute path of the bundled host entry module. */
@@ -24,6 +25,7 @@ export interface HostProcessOptions {
   readonly args?: readonly string[];
   readonly onEvent: (event: HostEvent) => void;
   readonly onExit: (code: number) => void;
+  readonly onBrowserRequest?: (sessionId: string, request: BrowserRequest) => Promise<BrowserSnapshot>;
 }
 
 type Pending = (response: CommandResponse) => void;
@@ -57,6 +59,16 @@ export class HostProcess {
         resolve?.(message.response);
       } else if (message.kind === "event") {
         options.onEvent(message.event);
+      } else if (message.kind === "browser_request") {
+        void (async () => {
+          try {
+            if (options.onBrowserRequest === undefined) throw new Error("The shared browser is not available.");
+            const value = await options.onBrowserRequest(message.sessionId, message.request);
+            this.child.postMessage({ kind: "browser_response", id: message.id, response: { ok: true, value } } satisfies HostInbound);
+          } catch (error) {
+            this.child.postMessage({ kind: "browser_response", id: message.id, response: { ok: false, error: { code: "invalid_input", name: "BrowserError", message: error instanceof Error ? error.message : String(error) } } } satisfies HostInbound);
+          }
+        })();
       }
     });
 

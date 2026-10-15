@@ -10,8 +10,8 @@
  * Notifications are batched to one animation frame. A streaming run can emit
  * many deltas per frame; batching keeps redraws bounded by the display rate.
  *
- * This is a view cache of host data, not a source of truth: everything here
- * can be rebuilt from host queries after a reload.
+ * Host data is a view cache rebuilt from queries after reload. Per-device
+ * interface preferences are restored separately from localStorage.
  */
 import type {
   AccountView,
@@ -27,6 +27,7 @@ import type {
   SessionSummaryView,
   SessionView,
   JournalEntryView,
+  UserQuestionRequest,
   ProjectView,
 } from "../../contracts/desktop/index.js";
 
@@ -35,6 +36,7 @@ export interface LiveRun {
   readonly run: RunView;
   readonly events: readonly RuntimeEvent[];
   readonly pendingApprovals: readonly ApprovalRequest[];
+  readonly pendingQuestions?: readonly UserQuestionRequest[];
   /** Decisions made while this renderer was connected, keyed by approval ID. */
   readonly decisions: Readonly<Record<string, "allow" | "deny">>;
   readonly cancelRequested: boolean;
@@ -50,7 +52,7 @@ export interface Notice {
 }
 
 /** Sections of the settings overlay. Only some have content today. */
-export type SettingsSection = "general" | "accounts" | "permissions" | "plugins" | "shortcuts" | "notifications" | "about";
+export type SettingsSection = "general" | "accounts" | "models" | "permissions" | "plugins" | "shortcuts" | "notifications" | "about";
 
 export interface AppState {
   readonly host: { readonly status: "connecting" | "ready" | "exited"; readonly detail?: string };
@@ -58,6 +60,8 @@ export interface AppState {
   readonly runtimes: readonly RuntimeView[];
   /** Unified model catalog; each entry carries hidden host routing metadata. */
   readonly models: readonly ModelView[];
+  /** Per-device starred routing keys, retained even while a model is unavailable. */
+  readonly favoriteModelKeys: readonly string[];
   readonly modelCatalogFailures: readonly { readonly providerName: string; readonly accountId: string }[];
   /** Top-level projects rendered by the navigator. */
   readonly projects: readonly ProjectView[];
@@ -98,6 +102,7 @@ export const INITIAL_STATE: AppState = {
   accounts: [],
   runtimes: [],
   models: [],
+  favoriteModelKeys: [],
   modelCatalogFailures: [],
   projects: [],
   sessions: [],

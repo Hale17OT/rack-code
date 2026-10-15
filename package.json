@@ -4,11 +4,13 @@
   "private": true,
   "description": "Desktop coding agent harness",
   "scripts": {
+    "rebuild:native": "electron-rebuild -f -w node-pty",
     "build": "tsc --project tsconfig.json",
     "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.renderer.json",
     "build:desktop": "tsx scripts/build-desktop.ts",
     "start": "npm run build:desktop && electron .",
     "test": "tsx --test \"src/**/*.test.ts\"",
+    "test:desktop-features": "esbuild scripts/verify-desktop-features.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-desktop/verify-features.mjs && electron dist-desktop/verify-features.mjs",
     "check": "npm run typecheck && npm run build && npm test && npm run build:desktop"
   },
   "engines": {
@@ -16,6 +18,7 @@
   },
   "type": "module",
   "devDependencies": {
+    "@electron/rebuild": "^4.2.1",
     "@types/node": "^26.6.5",
     "electron": "^44.7.0",
     "esbuild": "^0.28.2",
@@ -24,9 +27,13 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.296",
+    "@fontsource-variable/geist-mono": "5.3.0",
     "@fontsource-variable/inter": "^5.3.0",
     "@fontsource/ibm-plex-mono": "^5.3.0",
-    "@phosphor-icons/core": "^2.1.1"
+    "@phosphor-icons/core": "^2.1.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.1.0"
   },
   "main": "dist-desktop/main.mjs"
 }

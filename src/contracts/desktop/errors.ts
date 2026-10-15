@@ -16,6 +16,8 @@ export type HostErrorCode =
   | "project_not_found"
   | "project_busy"
   | "session_not_found"
+  | "session_busy"
+  | "file_conflict"
   | "runtime_not_found"
   | "run_not_found"
   | "run_not_active"
@@ -24,6 +26,16 @@ export type HostErrorCode =
   | "connector_not_found"
   | "connect_not_found"
   | "host_unavailable"
+  /** An optional feature was not assembled in this host. */
+  | "feature_unavailable"
+  /** Timeline settings cannot change while a run edits the project. */
+  | "timeline_busy"
+  /** The session's project cannot host Timeline snapshots. */
+  | "timeline_unsupported"
+  /** "No snapshot for this action". */
+  | "snapshot_not_found"
+  /** "File is not part of this snapshot". */
+  | "snapshot_path_invalid"
   | "internal";
 
 export interface HostErrorPayload {

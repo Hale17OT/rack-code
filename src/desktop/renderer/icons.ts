@@ -1,9 +1,9 @@
 /**
- * Phosphor icon set (regular weight), bundled as inline SVG markup.
+ * Phosphor icon set (regular weight, filled star for favorites), bundled as inline SVG markup.
  *
  * Only the icons listed here are imported, so the bundle carries exactly
  * what the UI uses. To add an icon, import its SVG from
- * `@phosphor-icons/core/assets/regular/<name>.svg` and add it to `ICONS`.
+ * `@phosphor-icons/core/assets/regular/<name>.svg` (or its fill variant) and add it to `ICONS`.
  *
  * The SVG strings come from the bundled package, never from host or
  * provider data, so assigning them with `innerHTML` cannot inject content.
@@ -36,8 +36,11 @@ import Wrench from "@phosphor-icons/core/assets/regular/wrench.svg";
 import Shield from "@phosphor-icons/core/assets/regular/shield.svg";
 import ShieldCheck from "@phosphor-icons/core/assets/regular/shield-check.svg";
 import ArrowUp from "@phosphor-icons/core/assets/regular/arrow-up.svg";
+import ArrowDown from "@phosphor-icons/core/assets/regular/arrow-down.svg";
 import X from "@phosphor-icons/core/assets/regular/x.svg";
+import TrashSimple from "@phosphor-icons/core/assets/regular/trash-simple.svg";
 import ArrowClockwise from "@phosphor-icons/core/assets/regular/arrow-clockwise.svg";
+import ArrowsOutSimple from "@phosphor-icons/core/assets/regular/arrows-out-simple.svg";
 import Key from "@phosphor-icons/core/assets/regular/key.svg";
 import Clock from "@phosphor-icons/core/assets/regular/clock.svg";
 import Coins from "@phosphor-icons/core/assets/regular/coins.svg";
@@ -78,8 +81,12 @@ import FileText from "@phosphor-icons/core/assets/regular/file-text.svg";
 import Code from "@phosphor-icons/core/assets/regular/code.svg";
 import ArrowUpRight from "@phosphor-icons/core/assets/regular/arrow-up-right.svg";
 import DotsThree from "@phosphor-icons/core/assets/regular/dots-three.svg";
+import Star from "@phosphor-icons/core/assets/regular/star.svg";
+import StarFill from "@phosphor-icons/core/assets/fill/star-fill.svg";
 
 const ICONS = {
+  "star": Star,
+  "star-fill": StarFill,
   "arrow-up-right": ArrowUpRight,
   "dots-three": DotsThree,
   "clipboard": Clipboard,
@@ -113,8 +120,11 @@ const ICONS = {
   "shield": Shield,
   "shield-check": ShieldCheck,
   "arrow-up": ArrowUp,
+  "arrow-down": ArrowDown,
   "x": X,
+  "trash-simple": TrashSimple,
   "arrow-clockwise": ArrowClockwise,
+  "arrows-out-simple": ArrowsOutSimple,
   "key": Key,
   "clock": Clock,
   "coins": Coins,

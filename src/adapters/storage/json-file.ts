@@ -21,15 +21,23 @@ export class JsonFileDocument<T> {
   ) {}
 
   async read(): Promise<T> {
+    return this.select((value) => value);
+  }
+
+  /** Project before copying so a small query never clones an entire database.
+   * Selectors are internal read-only operations; their results are detached
+   * snapshots, with the same ownership guarantees as read().
+   */
+  async select<R>(project: (value: Readonly<T>) => R): Promise<R> {
     if (this.loaded !== undefined) {
-      return structuredClone(this.loaded);
+      return structuredClone(project(this.loaded));
     }
 
     // Share first-load migration across parallel host queries. Otherwise one
     // read can observe an older schema while another is already saving it.
     this.loading ??= this.load();
     try {
-      return structuredClone(await this.loading);
+      return structuredClone(project(await this.loading));
     } catch (error) {
       this.loading = undefined;
       throw error;
@@ -54,7 +62,7 @@ export class JsonFileDocument<T> {
       await this.write(migrated);
     }
     this.loaded = migrated;
-    return structuredClone(this.loaded);
+    return this.loaded;
   }
 
   async update(mutator: (current: T) => T | Promise<T>): Promise<T> {

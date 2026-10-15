@@ -59,6 +59,15 @@ export class SessionsService {
     return session;
   }
 
+  /** Removes Rack's conversation and continuation links. The host serializes
+   * this with run starts and refuses active sessions. Audit logs, artifacts,
+   * project files and provider-owned history have independent retention.
+   */
+  async remove(sessionId: SessionId): Promise<void> {
+    await this.get(sessionId);
+    await this.store.remove(sessionId);
+  }
+
   /** Imports a batch atomically from the caller's perspective, without rewriting session history. */
   async attachFiles(sessionId: SessionId, paths: readonly string[]): Promise<readonly SessionAttachment[]> {
     await this.get(sessionId);

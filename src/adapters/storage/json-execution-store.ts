@@ -46,11 +46,11 @@ export class JsonExecutionStore implements ExecutionStore {
   }
 
   async getRun(runId: RunId): Promise<RunRecord | undefined> {
-    return (await this.document.read()).runs.find((run) => run.id === runId);
+    return this.document.select((value) => value.runs.find((run) => run.id === runId));
   }
 
   async listRuns(sessionId: string): Promise<readonly RunRecord[]> {
-    return (await this.document.read()).runs.filter((run) => run.sessionId === sessionId);
+    return this.document.select((value) => value.runs.filter((run) => run.sessionId === sessionId));
   }
 
   async saveRun(run: RunRecord): Promise<void> {
@@ -61,7 +61,7 @@ export class JsonExecutionStore implements ExecutionStore {
   }
 
   async getAttempt(attemptId: AttemptId): Promise<AttemptRecord | undefined> {
-    return (await this.document.read()).attempts.find((attempt) => attempt.id === attemptId);
+    return this.document.select((value) => value.attempts.find((attempt) => attempt.id === attemptId));
   }
 
   async saveAttempt(attempt: AttemptRecord): Promise<void> {
@@ -86,6 +86,6 @@ export class JsonExecutionStore implements ExecutionStore {
   }
 
   async listJournal(runId: RunId): Promise<readonly JournalEntry[]> {
-    return (await this.document.read()).journal.filter((entry) => entry.runId === runId);
+    return this.document.select((value) => value.journal.filter((entry) => entry.runId === runId));
   }
 }

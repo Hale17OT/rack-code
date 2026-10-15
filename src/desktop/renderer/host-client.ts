@@ -15,7 +15,9 @@ import {
   type OpenPathRequest,
   type OpenPathResult,
   type AttachmentKind,
+  type TimelineWindowRequest,
 } from "../../contracts/desktop/index.js";
+import type { BrowserPresentation } from "../../features/browser/index.js";
 
 declare global {
   interface Window {
@@ -31,6 +33,8 @@ export interface HostClient {
   selectFiles(kind: AttachmentKind): Promise<readonly string[]>;
   /** Opens or reveals a clicked path through Electron main. */
   openPath(request: OpenPathRequest): Promise<OpenPathResult>;
+  openTimelineWindow(request: TimelineWindowRequest): Promise<void>;
+  presentBrowser(request: BrowserPresentation): Promise<void>;
 }
 
 export function createHostClient(bridge: HarnessBridge = window.harness): HostClient {
@@ -46,5 +50,10 @@ export function createHostClient(bridge: HarnessBridge = window.harness): HostCl
     selectDirectory: (options) => bridge.selectDirectory(options),
     selectFiles: (kind) => bridge.selectFiles(kind),
     openPath: (request) => bridge.openPath(request),
+    presentBrowser: (request) => bridge.presentBrowser(request),
+    async openTimelineWindow(request) {
+      const response = await bridge.openTimelineWindow(request);
+      if (!response.ok) throw new HostCommandError(response.error);
+    },
   };
 }

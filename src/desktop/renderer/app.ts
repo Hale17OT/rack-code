@@ -7,6 +7,8 @@
  * it from this file. Features never discover each other; the only
  * cross-feature imports are explicit sub-views (settings hosts the accounts
  * pane, and the session view hosts inline run details).
+ * A Timeline window uses the same bundled page and bridge, but mounts only
+ * the independent read-only viewer rather than chat state or run controls.
  */
 import { Controller } from "./controller.js";
 import { mountComposer } from "./features/composer.js";
@@ -17,21 +19,27 @@ import { mountShell } from "./features/shell.js";
 import { mountWorkbench } from "./features/workbench.js";
 import { createHostClient } from "./host-client.js";
 import { Store } from "./store.js";
+import { mountSnapshotWindow } from "./features/snapshot-window.js";
 
 const root = document.getElementById("app");
 if (root === null) {
   throw new Error("Missing #app root element.");
 }
 
-const store = new Store();
-const controller = new Controller(createHostClient(), store);
+const params = new URLSearchParams(window.location.search);
+if (params.get("view") === "timeline") {
+  mountSnapshotWindow(root, createHostClient(), params);
+} else {
+  const store = new Store();
+  const controller = new Controller(createHostClient(), store);
 
-const regions = mountShell(root, store, controller);
-mountNavigator(regions.navigator, store, controller);
-mountSessionView(regions.session, regions.sessionHeader, store, controller);
-mountComposer(regions.composer, store, controller);
-mountWorkbench(regions.workbench, store, regions.isWorkbenchVisible, controller);
-mountSettings(regions.overlay, store, controller);
+  const regions = mountShell(root, store, controller);
+  mountNavigator(regions.navigator, store, controller);
+  mountSessionView(regions.session, regions.sessionHeader, store, controller);
+  mountComposer(regions.composer, store, controller);
+  mountWorkbench(regions.workbench, store, regions.isWorkbenchVisible, controller);
+  mountSettings(regions.overlay, store, controller);
 
-controller.loadPreferences();
-void controller.start();
+  controller.loadPreferences();
+  void controller.start();
+}
