@@ -4,6 +4,23 @@ Status: documentation findings and implemented adapter notes, updated 2026-10-12
 
 ## Codex app server
 
+### Windows executable discovery (2026-10-16)
+
+Sign-in and runtime operations share `adapters/runtimes/codex-command.ts` to
+resolve a native `codex.exe`. Electron's direct process spawning cannot run
+npm's PowerShell or command-file launchers as a bare `codex` command. The
+resolver checks absolute PATH entries in order for native executables and
+known npm package layouts, then the standard `%APPDATA%/npm` installation
+when the desktop inherited an older PATH. Both x64 and ARM64 package layouts
+are supported. It launches without a shell and preserves account-specific
+`CODEX_HOME` isolation. Explicit adapter command overrides and non-Windows
+launches keep their existing behavior.
+
+If no supported installation is found, the error asks the user to install
+Codex CLI for Windows and restart Rack. Custom npm prefixes must be on PATH;
+restart the app after changing PATH. This resolves launch failures such as
+`spawn codex ENOENT`; it does not complete browser authentication for the user.
+
 The official documentation describes threads, turns, streamed items, native resume, history reads, client approval requests, and MCP integration. It also describes experimental history injection and dynamic tools; those should not become assumed stable dependencies. Native thread state remains Codex-managed, even when our application owns the user-facing conversation. This does not document a universal transcript interchangeable with Claude.
 
 The documentation exposes account rate-limit queries and updates. It distinguishes local/open-source app-server authentication from commercial or hosted offerings, directing the latter toward Sign in with ChatGPT. Confirm the supported authentication route for the intended distribution model before implementing subscription-account switching.

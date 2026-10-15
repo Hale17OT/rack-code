@@ -1,5 +1,10 @@
 # Change log
 
+## 2026-10-16 - Codex account launch on Windows
+
+- Fixed bare-command executable discovery behind `spawn codex ENOENT`. Sign-in, model discovery, runs and Codex terminals now share native Windows CLI discovery through PATH and the standard per-user npm prefix, supporting nested/hoisted platform packages and bundled vendor layouts without a shell. Missing installations produce an actionable error; explicit commands and non-Windows behavior are preserved.
+- Validation performed: type checks, 13 focused resolver/runtime tests, desktop build and whitespace checks passed. A real installed Codex server initialized successfully with a stripped-down PATH and disposable isolated CODEX_HOME. Full browser sign-in, an authenticated model turn, packaged Electron launch and the complete test suite were not performed.
+
 ## 2026-10-15 - Complete Terminal, Browser and Files
 
 - Finished the three interactive surfaces and their host/runtime wiring. Terminal reconnects to context-owned PTYs, prefers Codex's standalone command API when available, falls back to a local PTY, orders input, resizes and exposes exit status. Fixed xterm initialization before DOM attachment, pending-start cleanup, session-removal retention, cancelled-unload cleanup and native Unicode chunk decoding.

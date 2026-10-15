@@ -1,5 +1,6 @@
 import { JsonRpcProcess, type JsonRpcMessage } from "../runtimes/json-rpc-process.js";
 import { AsyncQueue } from "../../core/shared/async-queue.js";
+import { resolveCodexCommand } from "../runtimes/codex-command.js";
 import type {
   AccountConnector,
   ConnectAttempt,
@@ -39,13 +40,13 @@ export class CodexConnector implements AccountConnector {
   connect(context: ConnectContext): ConnectAttempt {
     const events = new AsyncQueue<ConnectEvent>();
     const start = this.options.createProcess ?? JsonRpcProcess.start.bind(JsonRpcProcess);
-    const child = start(this.options.command ?? "codex", this.options.args ?? ["app-server", "--stdio"], {
+    const environment = { ...process.env, ...context.environment, CODEX_HOME: context.directory };
+    const command = this.options.createProcess === undefined
+      ? resolveCodexCommand(this.options.command, { environment })
+      : this.options.command ?? "codex";
+    const child = start(command, this.options.args ?? ["app-server", "--stdio"], {
       cwd: context.directory,
-      environment: {
-        ...process.env,
-        ...context.environment,
-        CODEX_HOME: context.directory,
-      },
+      environment,
     });
     let loginId: string | undefined;
     let stopped = false;
