@@ -1,5 +1,10 @@
 # Change log
 
+## 2026-10-16 - Windows session import and clearer import icon
+
+- Fixed the session importer's bare Codex launch to use native Windows CLI discovery. Windows Codex/Claude history enumeration now matches folder identity locally across drive casing, separators and extended paths, with the same validation before saving. Claude reads the recorded directory spelling. Replaced the database icon with a tray/down-arrow import icon in the project action and imported-history label.
+- Validation: type checks, desktop build and 17 focused resolver/source/path/service/host tests passed, including durable import reload and Windows folder matching. Real Windows Codex history discovery/read and import into an in-memory Rack store succeeded, including duplicate detection; real Claude discovery returned no sessions for this project. Claude transcript import used fixtures. No model turn, original transcript mutation, WSL discovery or packaged-app UI test was performed.
+
 ## 2026-10-16 - Restore sidebar app name
 
 - Restored the `thinking & code` wordmark and its original header spacing below the menu bar. The duplicate native window title remains hidden.
