@@ -88,7 +88,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     await child.request("initialize", {
       clientInfo: { name: "thinking-and-code", title: "Thinking and Code", version: "0.1.0" },
       capabilities: {},
-    });
+    }, 10_000);
     child.notify("initialized", {});
     const models = new Map<string, RuntimeModel>();
     const cursors = new Set<string>();
@@ -178,7 +178,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     let closed = false;
     const decoder = new StringDecoder("utf8");
     try {
-      await child.request("initialize", { clientInfo: { name: "thinking-and-code", title: "Rack Terminal", version: "0.1.0" }, capabilities: { experimentalApi: true } });
+      await child.request("initialize", { clientInfo: { name: "thinking-and-code", title: "Rack Terminal", version: "0.1.0" }, capabilities: { experimentalApi: true } }, 10_000);
       child.notify("initialized", {});
       const processId = "rack-terminal";
       let ready!: () => void;
@@ -252,7 +252,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           version: "0.1.0",
         },
         capabilities: { experimentalApi: true },
-      });
+      }, 10_000);
       childProcess.notify("initialized", {});
 
       appTools = await startAppToolServer(input.tools ?? [], input.signal);
