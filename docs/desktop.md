@@ -4,6 +4,14 @@ Status: first desktop UI implemented, updated 2026-10-14. It presents the headle
 
 ## Process layout
 
+Command activity labels distinguish an empty standalone ripgrep search from a
+failed command. A finished `rg` invocation with exit code 1, explicitly empty
+output and no diagnostics displays **Search · No matches**, without a failure
+badge or failed group count. Simple PowerShell and POSIX shell wrappers are
+recognized. Compound commands, pipelines, diagnostics and unknown result shapes
+retain their existing failure labels; the renderer does not infer the success of
+each step in a batch. Raw exit codes and persisted provider outcomes are unchanged.
+
 Settings > Accounts includes **Connection details** actions opening a right-side
 drawer with an explicit **Test connection** button (2026-10-16). These report local executable,
 version, startup and sign-in observations with pending/error states and a
@@ -196,3 +204,12 @@ Git status/diff reads are read-only and scoped to the saved project folder. Stat
 ### Native permission choices
 
 Approve for me uses the provider’s own automatic reviewer: Codex `auto_review` with the workspace-write sandbox, and Claude SDK `auto`. The provider can approve or deny an action; Rack does not open its manual tool-approval dialog for this mode. Ask me forwards native permission requests to Allow/Deny. Full access uses native bypass controls. Read only uses the native read-only sandbox/planning mode and denies requested mutations. The permission picker shows the active run’s selected mode and stays disabled until it ends, so it cannot imply that a setting changed mid-run.
+
+## Copying transcript content (2026-10-16)
+
+Code blocks, tool sections (including commands and output), and completed run
+responses have small copy buttons. They copy original text without UI labels;
+response copying preserves Markdown. The control briefly reports success or
+clipboard failure. Text can also be selected normally. Transcript redraws wait
+while a selection is being dragged or held, then catch up when it clears;
+switching sessions still renders the destination immediately.

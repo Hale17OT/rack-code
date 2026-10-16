@@ -3699,3 +3699,16 @@ html.resizing * {
   .theme-choices { grid-template-columns: 1fr; }
   .connect-buttons { grid-template-columns: 1fr; }
 }
+
+/* Keep copy controls outside selectable source text and reachable by keyboard. */
+.copyable-code { position: relative; min-width: 0; }
+.copyable-code > .md-code { padding-top: 38px; }
+.copyable-code > .copy-button { position: absolute; top: 6px; right: 6px; }
+.copy-button { display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 4px; flex-shrink: 0;
+  color: var(--text-3); border: 1px solid transparent; border-radius: 6px;
+  background: transparent; cursor: pointer; user-select: none; }
+.copy-button:hover, .copy-button:focus-visible { color: var(--text-1); background: var(--inset); border-color: var(--border); }
+.copy-button .icon { width: 16px; height: 16px; }
+.activity-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.transcript pre, .transcript code { user-select: text; }

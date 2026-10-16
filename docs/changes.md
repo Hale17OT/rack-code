@@ -1,5 +1,22 @@
 # Change log
 
+## 2026-10-16 - Non-alarming empty search results
+
+- Standalone ripgrep searches with exit code 1, explicit empty output and no diagnostics now display No matches instead of Failed, including simple PowerShell/POSIX shell wrappers and imported activities. Tool groups treat that display outcome as completed; raw exit codes and journal events remain intact. Ambiguous compound commands and genuine errors remain failures, following [ripgrep exit-status semantics](https://github.com/BurntSushi/ripgrep/blob/master/crates/core/flags/doc/template.rg.1).
+- Validation: type checks and all five tool-presentation tests passed, covering empty searches, wrappers, imported history, incomplete activities, errors and compound commands. No native UI interaction check performed.
+
+## 2026-10-16 - Recover transient JSON save failures
+
+- Investigated a real failed run reporting EPERM while replacing execution.json. Shared JSON persistence now retries transient EPERM/EACCES/EBUSY replacements up to five times with 620ms total backoff, without replaying the mutation or deleting the destination. Unique staging filenames avoid same-process temporary-name collisions, and abandoned staging files are cleaned up where possible.
+- Fixed cache publication before successful persistence: failed writes leave readers and subsequent updates on the last committed value. This consistency fix applies across operating systems; no macOS-specific settings change. It does not establish the cause of earlier generic provider exit-code failures.
+- Validation: type checks, desktop build and four targeted persistence regressions passed on Windows, covering transient/permanent failure, bounded retries, failed-save cache isolation, cleanup, queued updates and disk reload. Broader storage/execution/import checks: 20 passed, four project-migration tests failed on existing POSIX-versus-Windows path expectations. No macOS execution or live failure injection into user data was performed.
+
+## 2026-10-16 - Transcript selection and copy controls
+
+- Preserve transcript DOM while dragging or holding a text selection so live updates do not erase it. Add compact copy controls for code blocks, tool sections, and completed responses, with inline success/failure feedback.
+- Validation: type checks, desktop build, all 11 focused Markdown/tool-presentation tests, and git diff --check passed. Native clipboard and interactive selection checks have not been performed.
+
+
 ## 2026-10-16 - Windows session import and clearer import icon
 
 - Fixed the session importer's bare Codex launch to use native Windows CLI discovery. Windows Codex/Claude history enumeration now matches folder identity locally across drive casing, separators and extended paths, with the same validation before saving. Claude reads the recorded directory spelling. Replaced the database icon with a tray/down-arrow import icon in the project action and imported-history label.
